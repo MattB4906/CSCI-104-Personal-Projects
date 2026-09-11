@@ -111,7 +111,6 @@ void PriorityQueue::add(const Ticket& ticket)
 
     data[currentTicketNum] = ticket;
     trickleUp(currentTicketNum);
-
     currentTicketNum++;
 }
 
