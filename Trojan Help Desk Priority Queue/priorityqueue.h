@@ -13,17 +13,17 @@ class PriorityQueue {
         const Ticket& peek() const;
         Ticket remove();
         bool isEmpty() const;
-        int getSize() const;
+        std::size_t getSize() const;
         void print() const;
 
     private:
         Ticket* data;
-        int currentTicketNum;
-        int capacity;
+        std::size_t currentTicketNum;
+        std::size_t capacity;
 
         bool higherPriority(const Ticket& first, const Ticket& second) const;
-        void trickleUp(int index);
-        void trickleDown(int index);
+        void trickleUp(std::size_t index);
+        void trickleDown(std::size_t index);
 };
 
 #endif

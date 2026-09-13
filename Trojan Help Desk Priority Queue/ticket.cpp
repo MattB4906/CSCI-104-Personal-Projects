@@ -52,7 +52,7 @@ bool Ticket::operator==(const Ticket& rhs) const
 
 std::ostream& operator<<(std::ostream& os, const Ticket& t)
 {
-    os << "Ticket " << t.id << " | Priority: " << t.priority << " | Description: " << t.description << std::endl;
+    os << "Ticket " << t.id << " | Priority: " << t.priority << " | Description: " << t.description;
 
     return os;
 }

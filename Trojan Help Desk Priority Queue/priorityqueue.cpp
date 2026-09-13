@@ -11,10 +11,10 @@ bool PriorityQueue::higherPriority(const Ticket& first, const Ticket& second) co
     return first.getPriority() < second.getPriority();
 }
 
-void PriorityQueue::trickleUp(int index)
+void PriorityQueue::trickleUp(std::size_t index)
 {
     while(index > 0) {
-        int parent = (index - 1) / 2;
+        std::size_t parent = (index - 1) / 2;
 
         if(!higherPriority(data[index], data[parent])) {
             return;
@@ -28,11 +28,11 @@ void PriorityQueue::trickleUp(int index)
     }
 }
 
-void PriorityQueue::trickleDown(int index)
+void PriorityQueue::trickleDown(std::size_t index)
 {
     while(true) {
-        int lChild = 2 * index + 1;
-        int rChild = 2 * index + 2;
+        std::size_t lChild = 2 * index + 1;
+        std::size_t rChild = 2 * index + 2;
     
         if(lChild >= currentTicketNum) {
             return;
@@ -63,7 +63,7 @@ PriorityQueue::PriorityQueue() : currentTicketNum(0), capacity(4)
 PriorityQueue::PriorityQueue(const PriorityQueue& other)
 : data(new Ticket[other.capacity]), currentTicketNum(other.currentTicketNum), capacity(other.capacity)
 {
-    for(int i = 0; i < currentTicketNum; i++) {
+    for(std::size_t i = 0; i < currentTicketNum; i++) {
         data[i] = other.data[i];
     }
 }
@@ -76,7 +76,7 @@ PriorityQueue& PriorityQueue::operator=(const PriorityQueue& other)
 
    Ticket* newData = new Ticket[other.capacity];
    
-   for(int i = 0; i < other.currentTicketNum; i++) {
+   for(std::size_t i = 0; i < other.currentTicketNum; i++) {
         newData[i] = other.data[i];
    }
    
@@ -100,7 +100,7 @@ void PriorityQueue::add(const Ticket& ticket)
         capacity = capacity * 2;
 
         Ticket* temp = new Ticket[capacity];
-        for(int i = 0; i < currentTicketNum; i++) {
+        for(std::size_t i = 0; i < currentTicketNum; i++) {
             temp[i] = data[i];
         }
 
@@ -143,7 +143,7 @@ bool PriorityQueue::isEmpty() const
     return !currentTicketNum;
 }
 
-int PriorityQueue::getSize() const
+std::size_t PriorityQueue::getSize() const
 {
     return currentTicketNum;
 }
@@ -158,7 +158,7 @@ void PriorityQueue::print() const
         return;
     }
 
-    for(int i = 0; i < currentTicketNum; i++) {
+    for(std::size_t i = 0; i < currentTicketNum; i++) {
         std::cout << data[i] << std::endl;
     }
 }
