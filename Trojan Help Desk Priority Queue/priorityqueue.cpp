@@ -175,3 +175,27 @@ bool PriorityQueue::containsId(int id) const
 
     return false;
 }
+
+bool PriorityQueue::cancelById(int id)
+{
+    if(currentTicketNum == 0) {
+        throw std::invalid_argument("No ticket present");
+    }
+    
+    if(!containsId(id)) {
+        return false;
+    }
+    for(size_t i = 0; i < currentTicketNum; i++) {
+        Ticket temp = data[i];
+        
+        if(temp.getId() == id) {
+            Ticket tempToRemove = data[i];
+
+            data[i] = data[currentTicketNum - 1];
+            currentTicketNum--;
+            trickleDown(0);
+
+            return true;
+        }
+    }
+}

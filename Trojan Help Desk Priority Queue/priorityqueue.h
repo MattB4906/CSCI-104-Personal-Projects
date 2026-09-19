@@ -16,6 +16,7 @@ class PriorityQueue {
         std::size_t getSize() const;
         void print() const;
         bool containsId(int id) const;
+        bool cancelById(int id);
 
     private:
         Ticket* data;
