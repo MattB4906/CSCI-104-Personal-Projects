@@ -46,21 +46,27 @@ int main() {
     q.add(t6);
     assert(q.getSize() == 6);
 
+    assert(q.peek() == t5);
     assert(q.remove() == t5);
     assert(q.getSize() == 5);
 
+    assert(q.peek() == t2);
     assert(q.remove() == t2);
     assert(q.getSize() == 4);
 
+    assert(q.peek() == t4);
     assert(q.remove() == t4);
     assert(q.getSize() == 3);
 
+    assert(q.peek() == t1);
     assert(q.remove() == t1);
     assert(q.getSize() == 2);
 
+    assert(q.peek() == t6);
     assert(q.remove() == t6);
     assert(q.getSize() == 1);
 
+    assert(q.peek() == t3);
     assert(q.remove() == t3);
     assert(q.getSize() == 0);
     assert(q.isEmpty());
