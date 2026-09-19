@@ -146,12 +146,12 @@ int main() {
             }
         }
 
-        if(input == 'Q') {
+        if(input == 'U') {
             int id, priority;
             
             cout << "Id: ";
             cin >> id;
-            
+
             if(cin.fail()) {
                 cout << "Incorrect input!" << endl;
         
@@ -161,11 +161,17 @@ int main() {
                 continue;
             }
 
+            if(!p.containsId(id)) {
+                cout << "Id does not exists" << endl;
+
+                continue;
+            }
+            
             cout << endl;
 
             cout << "Priority: ";
             cin >> priority;
-            
+
             if(cin.fail()) {
                 cout << "Incorrect input!" << endl;
         
@@ -174,12 +180,22 @@ int main() {
 
                 continue;
             }
+
+            if(priority < 1 || priority > 5) {
+                cout << "Priority must be between 1 and 5" << endl;
+
+                continue;
+            } 
 
             cout << endl; 
 
             if(!p.changePriority(id, priority)) {
                 continue;
-            }            
+            }
+
+            else {
+                cout << "Priority has been changed" << endl;
+            }
         }
     }
 
