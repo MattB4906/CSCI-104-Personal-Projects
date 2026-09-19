@@ -218,3 +218,41 @@ bool PriorityQueue::cancelById(int id)
 
     return false;
 }
+
+bool PriorityQueue::changePriority(int id, int newPriority)
+{
+    if(newPriority < 1 || newPriority > 5) {
+        std::cout << "Priority must be between 1 and 5" << std::endl;
+
+        return false;
+    }
+
+    for(size_t i = 0; i < currentTicketNum; i++) {
+        Ticket temp = data[i];
+
+        if(temp.getId() == id) {
+            Ticket t(id, newPriority, temp.getDescription(), temp.getArrivalNumber());
+            data[i] = t;
+
+            if(i > 0) {
+                std::size_t parent = (i - 1) / 2;
+                
+                if(higherPriority(data[i], data[parent])) {
+                    trickleUp(i);
+    
+                    return true;
+                }
+    
+                else {
+                    trickleDown(i);
+    
+                    return true;
+                }
+            }
+        }
+    }
+
+    std::cout << "Id not found" << std::endl;
+
+    return false;
+}

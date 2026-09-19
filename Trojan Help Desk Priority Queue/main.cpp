@@ -20,6 +20,7 @@ int main() {
         cout << "P: process/remove the next ticket" << endl;
         cout << "L: list all tickets" << endl;
         cout << "C: cancel a ticket by Id" << endl;
+        cout << "U: update a ticket's priority" << endl;
         cout << "Q: quit" << endl;
 
         if(!(cin >> input)) {
@@ -143,6 +144,42 @@ int main() {
             else {
                 cout << "Id does not exist" << endl;
             }
+        }
+
+        if(input == 'Q') {
+            int id, priority;
+            
+            cout << "Id: ";
+            cin >> id;
+            
+            if(cin.fail()) {
+                cout << "Incorrect input!" << endl;
+        
+                cin.clear();
+                cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+                continue;
+            }
+
+            cout << endl;
+
+            cout << "Priority: ";
+            cin >> priority;
+            
+            if(cin.fail()) {
+                cout << "Incorrect input!" << endl;
+        
+                cin.clear();
+                cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+                continue;
+            }
+
+            cout << endl; 
+
+            if(!p.changePriority(id, priority)) {
+                continue;
+            }            
         }
     }
 

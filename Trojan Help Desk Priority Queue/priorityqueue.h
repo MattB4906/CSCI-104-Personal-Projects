@@ -17,6 +17,7 @@ class PriorityQueue {
         void print() const;
         bool containsId(int id) const;
         bool cancelById(int id);
+        bool changePriority(int id, int newPriority);
 
     private:
         Ticket* data;
