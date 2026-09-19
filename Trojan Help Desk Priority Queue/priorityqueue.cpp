@@ -185,25 +185,34 @@ bool PriorityQueue::cancelById(int id)
             Ticket tempToRemove = data[i];
 
             data[i] = data[currentTicketNum - 1];
-            currentTicketNum--;
-
+            
             if(i == currentTicketNum - 1) {
                 return true;
             }
-
-            std::size_t parent = (i - 1) / 2;
-
-            if(!higherPriority(data[i], data[parent])) {
-                trickleUp(i);
-
-                return true;
+            
+            currentTicketNum--;
+            
+            if(i > 0) {
+                std::size_t parent = (i - 1) / 2;
+                
+                if(higherPriority(data[i], data[parent])) {
+                    trickleUp(i);
+    
+                    return true;
+                }
+    
+                else {
+                    trickleDown(i);
+    
+                    return true;
+                }       
             }
 
             else {
-                trickleDown(i);
-
-                return true;
-            }       
+               trickleDown(0);
+               
+               return true;
+            }
         }
     }
 
