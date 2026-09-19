@@ -182,11 +182,11 @@ bool PriorityQueue::cancelById(int id)
         Ticket temp = data[i];
         
         if(temp.getId() == id) {
-            Ticket tempToRemove = data[i];
-
             data[i] = data[currentTicketNum - 1];
             
             if(i == currentTicketNum - 1) {
+                currentTicketNum--;
+
                 return true;
             }
             
