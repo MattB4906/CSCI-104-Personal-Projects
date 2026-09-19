@@ -40,8 +40,13 @@ int main() {
                 continue;
             }
 
-            cout << endl;
+            if(p.containsId(id)) {
+                cout << "Id already exists" << endl;
 
+                continue;
+            }
+
+            cout << endl;
 
             int priority;
             cout << "Priority (between 1 and 5): ";
