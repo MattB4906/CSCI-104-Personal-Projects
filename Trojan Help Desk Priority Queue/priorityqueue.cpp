@@ -221,6 +221,10 @@ bool PriorityQueue::cancelById(int id)
 
 bool PriorityQueue::changePriority(int id, int newPriority)
 {
+    if(newPriority < 1 || newPriority > 5) {
+        return false;
+    }
+
     for(size_t i = 0; i < currentTicketNum; i++) {
         Ticket temp = data[i];
 

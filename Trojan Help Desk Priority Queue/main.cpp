@@ -163,6 +163,7 @@ int main() {
 
             if(!p.containsId(id)) {
                 cout << "Id does not exists" << endl;
+                cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
                 continue;
             }
@@ -183,6 +184,7 @@ int main() {
 
             if(priority < 1 || priority > 5) {
                 cout << "Priority must be between 1 and 5" << endl;
+                cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
                 continue;
             } 
