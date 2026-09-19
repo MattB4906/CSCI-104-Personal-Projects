@@ -39,7 +39,7 @@ int main() {
     assert(q.getSize() == 4);
 
     Ticket t5(105, 1, "Test", 4);
-    q.add(t4);
+    q.add(t5);
     assert(q.getSize() == 5);
 
     Ticket t6(106, 4, "Test", 5);
