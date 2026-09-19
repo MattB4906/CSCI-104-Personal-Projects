@@ -165,7 +165,7 @@ void PriorityQueue::print() const
 
 bool PriorityQueue::containsId(int id) const
 {
-    for(size_t i = 0; i < currentTicketNum - 1; i++) {
+    for(size_t i = 0; i < currentTicketNum; i++) {
         Ticket temp = data[i];
 
         if(temp.getId() == id) {

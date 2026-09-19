@@ -42,6 +42,8 @@ int main() {
 
             if(p.containsId(id)) {
                 cout << "Id already exists" << endl;
+                cin.clear();
+                cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
                 continue;
             }
