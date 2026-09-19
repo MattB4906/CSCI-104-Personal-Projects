@@ -177,14 +177,7 @@ bool PriorityQueue::containsId(int id) const
 }
 
 bool PriorityQueue::cancelById(int id)
-{
-    if(currentTicketNum == 0) {
-        throw std::invalid_argument("No ticket present");
-    }
-    
-    if(!containsId(id)) {
-        return false;
-    }
+{   
     for(size_t i = 0; i < currentTicketNum; i++) {
         Ticket temp = data[i];
         
@@ -193,9 +186,26 @@ bool PriorityQueue::cancelById(int id)
 
             data[i] = data[currentTicketNum - 1];
             currentTicketNum--;
-            trickleDown(0);
 
-            return true;
+            if(i == currentTicketNum - 1) {
+                return true;
+            }
+
+            std::size_t parent = (i - 1) / 2;
+
+            if(!higherPriority(data[i], data[parent])) {
+                trickleUp(i);
+
+                return true;
+            }
+
+            else {
+                trickleDown(i);
+
+                return true;
+            }       
         }
     }
+
+    return false;
 }
