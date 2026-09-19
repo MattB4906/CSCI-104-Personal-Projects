@@ -72,15 +72,17 @@ int main() {
     assert(q.isEmpty());
 
     PriorityQueue q1;
-    Ticket t_1(101, 1, "Test", 0);
-    Ticket t_2(102, 2, "Test", 1);
-    Ticket t_3(103, 3, "Test", 2);
+    Ticket t_1(101, 2, "Test", 0);
+    Ticket t_2(102, 3, "Test", 1);
+    Ticket t_3(103, 4, "Test", 2);
 
     q1.add(t_1);
     q1.add(t_2);
     q1.add(t_3);
 
-    PriorityQueue q2 = q1;
+    PriorityQueue q2;
+
+    q2 = q1;
 
     assert(q1.getSize() == 3 && q2.getSize() == 3);
     assert(q1.peek() == t_1 && q2.peek() == t_1);
@@ -89,7 +91,7 @@ int main() {
     assert(q2.peek() == t_2 && q2.getSize() == 2);
     assert(q1.peek() == t_1 && q1.getSize() == 3);
     
-    Ticket t_4(104, 0, "Test", 3);
+    Ticket t_4(104, 1, "Test", 3);
     q1.add(t_4);
     
     assert(q1.peek() == t_4 && q1.getSize() == 4);
@@ -99,8 +101,8 @@ int main() {
     assert(q1.getSize() == 3);
 
     assert(q1.peek() == t_1);
-    assert(q.remove() == t_1);
-    assert(q.getSize() == 2);
+    assert(q1.remove() == t_1);
+    assert(q1.getSize() == 2);
 
     assert(q1.peek() == t_2);
     assert(q1.remove() == t_2);
@@ -113,7 +115,7 @@ int main() {
 
     assert(q2.peek() == t_2);
     assert(q2.remove() == t_2);
-    assert(q.getSize() == 1);
+    assert(q2.getSize() == 1);
 
     assert(q2.peek() == t_3);
     assert(q2.remove() == t_3);
