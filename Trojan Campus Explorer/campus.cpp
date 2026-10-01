@@ -37,6 +37,21 @@ std::vector<std::string> explore(const Graph& graph, const std::string& start, F
         std::string current = frontier.pop();
 
         order.push_back(current);
+
+        for(size_t i = 0; i < graph.at(current).size(); i++) {
+            if(graph->first == "Parking") {
+                return order;
+            }
+
+            std::string neighbor = graph.at(current).at(i);
+
+            if(discovered.find(neighbor) == discovered.end()) {
+                continue;
+            }
+
+            discovered.insert(neighbor);
+            frontier.push(neighbor);
+        }
     }
 
     return order;
