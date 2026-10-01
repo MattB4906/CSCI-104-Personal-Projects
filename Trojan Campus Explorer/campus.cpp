@@ -1,3 +1,4 @@
+#include <set>
 #include "campus.h"
 
 bool AlphabeticalFirst::operator()(const std::string& a, const std::string& b) const
@@ -22,4 +23,14 @@ Graph makeCampusGraph()
     campus["Parking"] = {};
 
     return campus;
+}
+
+std::vector<std::string> explore(const Graph& graph, const std::string& start, Frontier<std::string>& frontier)
+{
+    std::set<std::string> discovered;
+    std::vector<std::string> order;
+
+    discovered.insert("start");
+
+    
 }
