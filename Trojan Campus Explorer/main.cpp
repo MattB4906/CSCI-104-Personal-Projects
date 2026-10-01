@@ -33,7 +33,17 @@ int main() {
     }
 
     cout << endl;
-    cout << "Isolated: Parking" << endl;
+    
+    vector<string> exploreIsolated= explore(campus, "Parking", fifo);
+
+    cout << "Isolated: ";
+    for(size_t i = 0; i < exploreIsolated.size(); i++) {
+        cout << exploreIsolated[i];
+
+        if(i != exploreIsolated.size() - 1) {
+            cout << " ";
+        }
+    }
 
     return 0;
 }
