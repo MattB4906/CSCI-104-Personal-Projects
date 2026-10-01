@@ -24,6 +24,10 @@ class FifoFrontier : public Frontier<T> {
         }
 
         T pop() override {
+            if(data_.empty()) {
+                std::out_of_range("No data");
+            }
+
             T temp = data_.front();
             data_.pop_front();
 
@@ -36,16 +40,20 @@ class FifoFrontier : public Frontier<T> {
 
     private:
     std::deque<T> data_;
-}
+};
 
 template <typename T, typename Compare>
 class PriorityFrontier : public Frontier<T> {
     public:
         void push(const T& value) override {
-
+            data_.push(value);
         }
 
         T pop() override {
+            if(data_.empty()) {
+                std::out_of_range("No data");
+            }
+
             T temp = data_.top();
             data_.pop();
 
@@ -58,6 +66,6 @@ class PriorityFrontier : public Frontier<T> {
 
     private:
         std::priority_queue<T, std::vector<T>, Compare> data_;
-}
+};
 
 #endif
