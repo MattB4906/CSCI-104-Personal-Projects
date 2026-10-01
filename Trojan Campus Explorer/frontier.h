@@ -25,7 +25,7 @@ class FifoFrontier : public Frontier<T> {
 
         T pop() override {
             if(data_.empty()) {
-                std::out_of_range("No data");
+                throw std::out_of_range("No data");
             }
 
             T temp = data_.front();
@@ -51,7 +51,7 @@ class PriorityFrontier : public Frontier<T> {
 
         T pop() override {
             if(data_.empty()) {
-                std::out_of_range("No data");
+                throw std::out_of_range("No data");
             }
 
             T temp = data_.top();
