@@ -30,7 +30,8 @@ std::vector<std::string> explore(const Graph& graph, const std::string& start, F
     std::set<std::string> discovered;
     std::vector<std::string> order;
 
-    discovered.insert("start");
+    discovered.insert(start);
+    frontier.push(start);
 
-    
+
 }
