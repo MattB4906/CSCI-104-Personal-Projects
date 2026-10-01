@@ -33,5 +33,11 @@ std::vector<std::string> explore(const Graph& graph, const std::string& start, F
     discovered.insert(start);
     frontier.push(start);
 
+    while(!frontier.empty()) {
+        std::string current = frontier.pop();
 
+        order.push_back(current);
+    }
+
+    return order;
 }
