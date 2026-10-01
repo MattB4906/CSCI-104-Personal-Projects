@@ -11,6 +11,6 @@ struct AlphabeticalFirst {
     bool operator()(const std::string& a, const std::string& b) const;
 };
 
-Graph makeCampusGraph;
+Graph makeCampusGraph();
 
 #endif

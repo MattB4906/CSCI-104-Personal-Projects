@@ -2,7 +2,7 @@
 
 bool AlphabeticalFirst::operator()(const std::string& a, const std::string& b) const
 {
-    if(b[0] < a[0]) {
+    if(b < a) {
         return true;
     }
 
@@ -20,4 +20,6 @@ Graph makeCampusGraph()
     campus["Gym"] = {"Dorm", "Stadium"};
     campus["Stadium"] = {"Library", "Gym"};
     campus["Parking"] = {};
+
+    return campus;
 }
