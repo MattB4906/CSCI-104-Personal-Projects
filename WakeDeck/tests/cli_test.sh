@@ -58,7 +58,22 @@ expect 1 "repeat 101" -- wake --mac "$MAC" --to "$TO" --repeat 101 --dry-run
 expect 1 "interval 10001" -- wake --mac "$MAC" --to "$TO" --interval-ms 10001 --dry-run
 expect 1 "unknown option" -- wake --mac "$MAC" --to "$TO" --bogus --dry-run
 
-contains "version string" "wakedeck-cli 0.1.0-m1" -- --version
+expect 0 "check --help" -- check --help
+expect 0 "connect --help" -- connect --help
+expect 1 "check without host" -- check
+expect 1 "check with bad port" -- check --host 192.0.2.10 --port 0
+expect 1 "check with bad kind" -- check --host 192.0.2.10 --kind bogus
+expect 1 "check with unknown option" -- check --host 192.0.2.10 --bogus
+expect 1 "connect without check host" -- connect
+expect 1 "connect with --mac but no --to" -- connect --check-host 192.0.2.10 --mac "$MAC"
+expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 --ports 9
+expect 1 "connect with bad check kind" -- connect --check-host 192.0.2.10 --check bogus
+expect 1 "connect with bad timeout" -- connect --check-host 192.0.2.10 --timeout-s 0
+
+contains "version string" "wakedeck-cli 0.2.0-m2" -- --version
+contains "help lists check" "check" -- --help
+contains "help lists connect" "connect" -- --help
+contains "connect help names exit codes" "2 timed out" -- connect --help
 contains "dry run plan line" "10 packets: port 9 x5, port 7 x5, 100 ms apart" -- wake --mac "$MAC" --to "$TO" --dry-run
 contains "dry run sends nothing" "nothing was sent" -- wake --mac "$MAC" --to "$TO" --dry-run
 contains "dry run hex dump" "FF FF FF FF FF FF 00 00 5E 00 53 2A 00 00 5E 00" -- wake --mac "$MAC" --to "$TO" --dry-run

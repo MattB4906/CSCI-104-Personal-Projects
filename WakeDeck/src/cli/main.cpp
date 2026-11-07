@@ -1,10 +1,11 @@
-// wakedeck-cli: Milestone 1 of WakeDeck, the wake logic as a command-line tool.
+// wakedeck-cli: WakeDeck's command-line tool.
 //
-//   wakedeck-cli wake --mac 00:00:5E:00:53:2A --to 192.168.1.255 [--ports 9,7]
-//                     [--repeat 5] [--interval-ms 100] [--dry-run]
+//   wake     send a wake request (Milestone 1; synchronous, no event loop)
+//   check    ask once whether a service is ready (Milestone 2)
+//   connect  check, wake if needed, keep checking until ready (Milestone 2)
 //
-// "Sent" means the packets left this computer. Only the readiness check of a
-// later milestone can tell whether the computer actually woke up.
+// "Sent" always means the packets left this computer. Only a check can tell
+// whether the service is actually ready.
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -16,6 +17,7 @@
 #include <system_error>
 #include <vector>
 
+#include "ConnectCommand.h"
 #include "core/MacAddress.h"
 #include "core/MagicPacket.h"
 #include "core/UdpSender.h"
@@ -24,15 +26,23 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.1.0-m1";
+constexpr const char* kVersion = "0.2.0-m2";
 
-void printUsage(std::ostream& out) {
-    out << "WakeDeck command-line prototype " << kVersion << "\n"
+void printGeneralUsage(std::ostream& out) {
+    out << "WakeDeck command-line tool " << kVersion << "\n"
         << "\n"
         << "Usage:\n"
+        << "  wakedeck-cli wake    --mac <address> --to <host> [options]   send a wake request\n"
+        << "  wakedeck-cli check   --host <host> [options]                 ask once whether a service is ready\n"
+        << "  wakedeck-cli connect --check-host <host> [options]           check, wake if needed, wait until ready\n"
+        << "  wakedeck-cli <command> --help                                options of one command\n"
+        << "  wakedeck-cli --version\n";
+}
+
+void printWakeUsage(std::ostream& out) {
+    out << "Usage:\n"
         << "  wakedeck-cli wake --mac <address> --to <host> [--ports 9,7] [--repeat 5]\n"
         << "                    [--interval-ms 100] [--dry-run]\n"
-        << "  wakedeck-cli --help | --version\n"
         << "\n"
         << "Options:\n"
         << "  --mac <address>    Target MAC: 00:00:5E:00:53:2A, 00-00-5E-00-53-2A or 00005E00532A\n"
@@ -46,7 +56,7 @@ void printUsage(std::ostream& out) {
         << "            3 socket error or some packets not sent.\n";
 }
 
-struct Options {
+struct WakeOptions {
     std::string mac;
     std::string to;
     std::string ports = "9,7";
@@ -65,9 +75,9 @@ std::optional<unsigned> parseUnsigned(std::string_view text, unsigned min, unsig
     return value;
 }
 
-int usageError(const std::string& message) {
+int usageError(const std::string& message, void (*usage)(std::ostream&)) {
     std::cerr << "error: " << message << "\n\n";
-    printUsage(std::cerr);
+    usage(std::cerr);
     return 1;
 }
 
@@ -91,12 +101,12 @@ std::string describePlan(const wakedeck::WakeTarget& target, std::size_t count) 
 }
 
 // Fills `options` from the arguments after the command. Returns an exit code
-// on a usage error, std::nullopt when everything parsed.
-std::optional<int> parseArguments(const std::vector<std::string>& args, Options& options) {
+// on a usage error or help request, std::nullopt when everything parsed.
+std::optional<int> parseWakeArguments(const std::vector<std::string>& args, WakeOptions& options) {
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& flag = args[i];
         if (flag == "--help" || flag == "-h") {
-            printUsage(std::cout);
+            printWakeUsage(std::cout);
             return 0;
         }
         if (flag == "--dry-run") {
@@ -105,8 +115,8 @@ std::optional<int> parseArguments(const std::vector<std::string>& args, Options&
         }
         const bool takesValue = flag == "--mac" || flag == "--to" || flag == "--ports" ||
                                 flag == "--repeat" || flag == "--interval-ms";
-        if (!takesValue) return usageError("unknown option '" + flag + "'");
-        if (i + 1 >= args.size()) return usageError(flag + " needs a value");
+        if (!takesValue) return usageError("unknown option '" + flag + "'", printWakeUsage);
+        if (i + 1 >= args.size()) return usageError(flag + " needs a value", printWakeUsage);
 
         const std::string& value = args[++i];
         if (flag == "--mac") {
@@ -117,44 +127,27 @@ std::optional<int> parseArguments(const std::vector<std::string>& args, Options&
             options.ports = value;
         } else if (flag == "--repeat") {
             const auto n = parseUnsigned(value, 1, 100);
-            if (!n) return usageError("--repeat must be a whole number from 1 to 100");
+            if (!n) return usageError("--repeat must be a whole number from 1 to 100", printWakeUsage);
             options.repeat = *n;
         } else {
             const auto n = parseUnsigned(value, 0, 10000);
-            if (!n) return usageError("--interval-ms must be a whole number from 0 to 10000");
+            if (!n) return usageError("--interval-ms must be a whole number from 0 to 10000", printWakeUsage);
             options.intervalMs = *n;
         }
     }
-    if (options.mac.empty()) return usageError("--mac is required");
-    if (options.to.empty()) return usageError("--to is required");
+    if (options.mac.empty()) return usageError("--mac is required", printWakeUsage);
+    if (options.to.empty()) return usageError("--to is required", printWakeUsage);
     return std::nullopt;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    const std::vector<std::string> args(argv + 1, argv + argc);
-    if (args.empty()) {
-        printUsage(std::cerr);
-        return 1;
-    }
-    if (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
-        printUsage(std::cout);
-        return 0;
-    }
-    if (args[0] == "--version") {
-        std::cout << "wakedeck-cli " << kVersion << "\n";
-        return 0;
-    }
-    if (args[0] != "wake") return usageError("unknown command '" + args[0] + "'");
-
-    Options options;
-    if (const auto exitCode = parseArguments(args, options)) return *exitCode;
+int runWake(const std::vector<std::string>& args) {
+    WakeOptions options;
+    if (const auto exitCode = parseWakeArguments(args, options)) return *exitCode;
 
     const auto mac = wakedeck::MacAddress::parse(options.mac);
-    if (!mac) return usageError("'" + options.mac + "' is not a valid MAC address");
+    if (!mac) return usageError("'" + options.mac + "' is not a valid MAC address", printWakeUsage);
     const auto ports = wakedeck::parsePortList(options.ports);
-    if (!ports) return usageError("'" + options.ports + "' is not a valid port list (example: 9,7)");
+    if (!ports) return usageError("'" + options.ports + "' is not a valid port list (example: 9,7)", printWakeUsage);
 
     wakedeck::WakeTarget target;
     target.destination = options.to;
@@ -209,4 +202,30 @@ int main(int argc, char** argv) {
     std::cout << "This confirms the packets were sent, not that the computer is awake.\n"
               << "Check the service you need (for example Sunshine) before connecting.\n";
     return report.allSent() ? 0 : 3;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const std::vector<std::string> args(argv + 1, argv + argc);
+    if (args.empty()) {
+        printGeneralUsage(std::cerr);
+        return 1;
+    }
+    const std::string& command = args[0];
+    if (command == "--help" || command == "-h" || command == "help") {
+        printGeneralUsage(std::cout);
+        return 0;
+    }
+    if (command == "--version") {
+        std::cout << "wakedeck-cli " << kVersion << "\n";
+        return 0;
+    }
+    if (command == "wake") return runWake(args);
+    if (command == "check") return wakedeck::cli::runCheck(argc, argv, args);
+    if (command == "connect") return wakedeck::cli::runConnect(argc, argv, args);
+
+    std::cerr << "error: unknown command '" << command << "'\n\n";
+    printGeneralUsage(std::cerr);
+    return 1;
 }

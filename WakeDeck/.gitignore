@@ -3,7 +3,11 @@
 *.d
 *.dSYM/
 build/
+build-*/
+CMakeUserPresets.json
+.cache/
 wakedeck-cli
 test_core
 test_loopback
+test_engine
 *.dmg

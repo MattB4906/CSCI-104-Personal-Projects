@@ -1,52 +1,53 @@
-# WakeDeck - Milestone 1: command-line wake prototype (no Qt yet).
-# Same compiler flags as the other projects in this repository.
+# WakeDeck - the Makefile is the entry point, as in the other projects of this
+# repository; underneath it drives CMake, which Qt needs.
 #
-#   make                 build build/wakedeck-cli
-#   make test            build and run the unit tests and the loopback test
-#   make run ARGS="..."  run the tool (default: --help)
+#   make                 configure (first time) and build everything into build/
+#   make test            build, then run every test through ctest
+#   make run ARGS="..."  run build/wakedeck-cli (default: --help)
 #   make clean           remove the build directory
 #
-# BUILD_DIR can be overridden, e.g.  make BUILD_DIR=/tmp/wakedeck-build
+# Requirements: CMake 3.21+, Qt 6 (Core, Network, Test), Ninja (optional).
+# With Homebrew:  brew install cmake ninja qt
+# Overridable: BUILD_DIR, BUILD_TYPE, JOBS, CMAKE, CTEST, GENERATOR, QT_PREFIX, ARGS.
 
-CXX       ?= c++
-CXXFLAGS  ?= -std=c++17 -Wall -Wextra -pedantic -O2
-CPPFLAGS  += -Isrc -MMD -MP
-BUILD_DIR ?= build
+BUILD_DIR  ?= build
+BUILD_TYPE ?= Release
+JOBS       ?= $(shell sysctl -n hw.ncpu 2>/dev/null || echo 2)
+ARGS       ?= --help
 
-CORE_SRCS := $(wildcard src/core/*.cpp)
-CORE_OBJS := $(CORE_SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
-CLI_SRCS  := $(wildcard src/cli/*.cpp)
-CLI_OBJS  := $(CLI_SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
+# Find the tools even when Homebrew is not on PATH yet.
+BREW      := $(shell command -v brew 2>/dev/null || { [ -x /opt/homebrew/bin/brew ] && echo /opt/homebrew/bin/brew; })
+CMAKE     ?= $(shell command -v cmake 2>/dev/null || echo /opt/homebrew/bin/cmake)
+CTEST     ?= $(shell command -v ctest 2>/dev/null || echo $(dir $(CMAKE))ctest)
+NINJA     := $(shell command -v ninja 2>/dev/null || { [ -x /opt/homebrew/bin/ninja ] && echo /opt/homebrew/bin/ninja; })
+QT_PREFIX ?= $(if $(BREW),$(shell $(BREW) --prefix qt 2>/dev/null),)
+GENERATOR ?= $(if $(NINJA),Ninja,Unix Makefiles)
 
-CLI   := $(BUILD_DIR)/wakedeck-cli
-TESTS := $(BUILD_DIR)/test_core $(BUILD_DIR)/test_loopback
-ARGS  ?= --help
+CMAKE_FLAGS := -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+ifneq ($(QT_PREFIX),)
+CMAKE_FLAGS += -DCMAKE_PREFIX_PATH=$(QT_PREFIX)
+endif
+ifneq ($(NINJA),)
+CMAKE_FLAGS += -DCMAKE_MAKE_PROGRAM=$(NINJA)
+endif
 
-.PHONY: all cli test run clean
+.PHONY: all configure build test run clean
 
-all: cli
+all: build
 
-cli: $(CLI)
+configure: $(BUILD_DIR)/CMakeCache.txt
 
-$(CLI): $(CORE_OBJS) $(CLI_OBJS)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+$(BUILD_DIR)/CMakeCache.txt: CMakeLists.txt
+	$(CMAKE) -S . -B $(BUILD_DIR) -G "$(GENERATOR)" $(CMAKE_FLAGS)
 
-$(BUILD_DIR)/%.o: src/%.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $< -o $@
+build: configure
+	$(CMAKE) --build $(BUILD_DIR) --parallel $(JOBS)
 
-$(BUILD_DIR)/test_%: tests/test_%.cpp tests/check.h $(CORE_OBJS)
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $< $(CORE_OBJS) -o $@
+test: build
+	cd $(BUILD_DIR) && $(CTEST) --output-on-failure
 
-test: $(TESTS) $(CLI)
-	@for t in $(TESTS); do echo "== $$t"; "$$t" || exit 1; done
-	@echo "== tests/cli_test.sh"; sh tests/cli_test.sh $(CLI)
-
-run: cli
-	$(CLI) $(ARGS)
+run: build
+	$(BUILD_DIR)/wakedeck-cli $(ARGS)
 
 clean:
 	rm -rf $(BUILD_DIR)
-
--include $(CORE_OBJS:.o=.d) $(CLI_OBJS:.o=.d)
