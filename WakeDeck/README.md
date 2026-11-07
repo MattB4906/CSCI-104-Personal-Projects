@@ -42,10 +42,10 @@ Once the PC is up, a VPN such as Tailscale gives it a stable address from anywhe
 
 ### Wake & Connect, step by step
 
-1. **Check.** Ask the service once. For Sunshine that is an HTTP `GET /serverinfo` on port 47989, the same request Moonlight uses to show a PC as online; the reply is XML with the host name and a state such as `SUNSHINE_SERVER_FREE`. For any other service it is a plain TCP connection to its port.
+1. **Check.** Ask the service once. For Sunshine that is an HTTP `GET /serverinfo` on port 47989, the same request Moonlight uses to show a PC as online; the reply is XML with the host name and a state such as `SUNSHINE_SERVER_FREE`, and a reply that is not Sunshine's counts as *not ready*. For any other service it is a plain TCP connection to its port.
 2. **Wake.** If the service did not answer and a wake is configured, send the magic packets. "Wake request sent" is reported as its own event.
 3. **Wait.** Check again every few seconds (default 3 s) until the service answers or the limit (default 2 minutes) runs out. Each check is classified:
-   - *refused*: the computer is up and refused the connection, so the service is not listening there yet;
+   - *refused*: something at that address refused the connection, usually the computer itself, awake but with the service not listening yet;
    - *timed out* or *unreachable*: nothing answered, so the computer is still off, or not reachable from here;
    - *name not resolved*: the host name could not be turned into an address, often a VPN that is not connected;
    - *not ready*: something answered on the port, but not with the expected reply.
@@ -96,7 +96,7 @@ The core has no Qt and no event loop; it is plain C++17 that any program could l
 
 ## How to Compile & Run
 
-Requirements: macOS 13 or later with the Xcode Command Line Tools, CMake 3.21 or later, Qt 6 (Core, Network, Test) and optionally Ninja. With Homebrew:
+Requirements: macOS 13 or later with the Xcode Command Line Tools, CMake 3.21 or later, Qt 6.7 or later (Core, Network, Test) and optionally Ninja. With Homebrew:
 
 ```bash
 brew install cmake ninja qt
@@ -141,10 +141,10 @@ Tip: keep your own values out of this repository. A shell alias or a small scrip
 
 - `test_core` (66 checks): MAC parsing, packet layout including the full hex dump decoded back, port-list parsing, plan order, `sendWake` through a recording sink including a simulated failing port, numeric address resolution. No sockets, no name lookups.
 - `test_loopback` (25 checks): a UDP listener on `127.0.0.1` receives three packets from the real `UdpSender` and checks every byte; then descriptor creation is blocked for a moment to check that a sender which cannot open its socket says so.
-- `test_engine` (24 test functions, Qt Test): Sunshine reply parsing; the TCP and Sunshine probes against servers on `127.0.0.1`, including a fake Sunshine that answers with real XML, a wrong service and an HTTP error; the waker over loopback, byte for byte; the session with scripted fakes through every outcome (ready at once, wake then ready, timeout with explanation, wake failure, no wake configured, cancel); the explanation text, durations and the Tailscale heuristic.
-- `tests/cli_test.sh` (38 checks): usage errors, help and `--dry-run` output of all three commands.
+- `test_engine` (28 test functions, Qt Test): Sunshine reply parsing, including the lenient case without a `status_code`; the TCP and Sunshine probes against servers on `127.0.0.1`, including a fake Sunshine that answers with real XML, a wrong service, an HTTP error and a silent server that makes the Sunshine check time out; the waker over loopback, byte for byte, plus its refusal of an empty plan; the session with scripted fakes through every outcome (ready at once, wake then ready, timeout with explanation, wake failure, launch failure and success, no wake configured, cancel, and a "keep waiting" extension); the explanation text, durations and the Tailscale heuristic.
+- `tests/cli_test.sh` (46 checks): usage errors, help and `--dry-run` output of all three commands, and, when `python3` is available to open ports, end-to-end runs of `check` and `connect` against closed and open loopback ports, with a wake request addressed to `127.0.0.1`, checking exit codes, the timeline and the "What happened" summary.
 
-Not covered automatically, because they need a silent or absent host: the *timed out*, *unreachable* and *name not resolved* classifications of the real probes, and a real wake reaching a real PC. The session's handling of those results is covered through the fakes.
+Not covered automatically, because they need a silent or absent host: the plain TCP check's own *timed out* path, the *unreachable* and *name not resolved* classifications of the real probes, and a real wake reaching a real PC. The session's handling of those results is covered through the fakes.
 
 ## Current Scope
 

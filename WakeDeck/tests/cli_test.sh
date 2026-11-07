@@ -83,5 +83,35 @@ contains "dash MAC is normalised" "Target MAC    00:00:5E:00:53:2A" -- wake --ma
 contains "usage error names the option" "unknown option '--bogus'" -- wake --mac "$MAC" --to "$TO" --bogus
 contains "usage error names the value" "'nope' is not a valid MAC address" -- wake --mac nope --to "$TO"
 
+# End-to-end runs against loopback ports, when python3 is there to pick a free
+# port and to listen on one. Nothing leaves the machine; the wake goes to 127.0.0.1.
+if command -v python3 >/dev/null 2>&1; then
+    CLOSED=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+    expect 2 "check against a closed loopback port" -- check --host 127.0.0.1 --port "$CLOSED" --kind tcp
+    contains "check reports refused" "Not ready: refused" -- check --host 127.0.0.1 --port "$CLOSED" --kind tcp
+    expect 2 "connect times out on a closed loopback port" -- \
+        connect --check-host 127.0.0.1 --check-port "$CLOSED" --check tcp --poll-s 1 --timeout-s 1
+    contains "connect explains the timeout" "What happened" -- \
+        connect --check-host 127.0.0.1 --check-port "$CLOSED" --check tcp --poll-s 1 --timeout-s 1
+    contains "connect reports the wake request" "Wake request sent: 4 packets to 127.0.0.1" -- \
+        connect --check-host 127.0.0.1 --check-port "$CLOSED" --check tcp --poll-s 1 --timeout-s 1 \
+        --mac "$MAC" --to 127.0.0.1 --repeat 2 --interval-ms 0
+
+    PORTFILE=$(mktemp)
+    python3 -I -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(1); print(s.getsockname()[1], flush=True); time.sleep(20)' > "$PORTFILE" &
+    LISTENER=$!
+    sleep 1
+    OPEN=$(cat "$PORTFILE")
+    expect 0 "check against an open loopback port" -- check --host 127.0.0.1 --port "$OPEN" --kind tcp
+    expect 0 "connect to an open loopback port" -- connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp
+    contains "connect says no wake was needed" "no wake request was needed" -- \
+        connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp --mac "$MAC" --to 127.0.0.1
+    kill "$LISTENER" 2>/dev/null
+    wait "$LISTENER" 2>/dev/null
+    rm -f "$PORTFILE"
+else
+    echo "note: python3 not found; the loopback end-to-end cases were skipped"
+fi
+
 echo "cli_test: $((total - failed))/$total checks passed"
 [ "$failed" -eq 0 ]

@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QObject>
+#include <QTimer>
 #include <charconv>
 #include <chrono>
 #include <iostream>
@@ -34,12 +35,15 @@ struct Flags {
 
 std::optional<std::string> parseFlags(const std::vector<std::string>& args, const std::set<std::string>& known,
                                       Flags& out) {
+    // A help request wins wherever it appears, even after a mistyped option.
     for (std::size_t i = 1; i < args.size(); ++i) {
-        const std::string& flag = args[i];
-        if (flag == "--help" || flag == "-h") {
+        if (args[i] == "--help" || args[i] == "-h") {
             out.help = true;
             return std::nullopt;
         }
+    }
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& flag = args[i];
         if (known.count(flag) == 0) return "unknown option '" + flag + "'";
         if (i + 1 >= args.size()) return flag + " needs a value";
         out.values[flag] = args[++i];
@@ -159,7 +163,9 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
         exitCode = result.ready() ? 0 : 2;
         app.quit();
     });
-    probe->start();
+    // Start from inside the event loop: a probe that fails synchronously would
+    // otherwise call quit() before exec() begins, and exec() would never return.
+    QTimer::singleShot(0, &app, [probe] { probe->start(); });
     app.exec();
     return exitCode;
 }
@@ -194,7 +200,8 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
         const auto mac = MacAddress::parse(flags.valueOr("--mac", ""));
         if (!mac) return usageError("'" + flags.valueOr("--mac", "") + "' is not a valid MAC address", printConnectUsage);
         WakeTarget wake;
-        wake.destination = flags.valueOr("--to", "");
+        wake.destination = QString::fromStdString(flags.valueOr("--to", "")).trimmed().toStdString();
+        if (wake.destination.empty()) return usageError("--to needs a host name or address", printConnectUsage);
         const auto ports = parsePortList(flags.valueOr("--ports", "9,7"));
         if (!ports) return usageError("'" + flags.valueOr("--ports", "") + "' is not a valid port list (example: 9,7)", printConnectUsage);
         wake.ports = *ports;
@@ -227,7 +234,8 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
         }
         app.quit();
     });
-    session.start();
+    // Same reason as in runCheck: start only once the event loop is running.
+    QTimer::singleShot(0, &app, [&session] { session.start(); });
     app.exec();
     return exitCode;
 }

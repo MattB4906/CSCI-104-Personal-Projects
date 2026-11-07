@@ -62,7 +62,9 @@ public:
     explicit SunshineProbe(const ProbeTarget& target, QObject* parent = nullptr);
     void start() override;
 
-    // Reads Sunshine's /serverinfo XML. Public so tests can feed it canned replies.
+    // Reads Sunshine's /serverinfo XML: the root element must be <root>, a
+    // status_code attribute, when present, must be 200, and <state> must exist.
+    // Public so tests can feed it canned replies.
     static ProbeResult interpretServerInfo(const QByteArray& body);
 
 private:

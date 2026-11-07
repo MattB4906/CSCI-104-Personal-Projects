@@ -10,7 +10,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 add_compile_options(-Wall -Wextra -pedantic)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Network Test)
+# 6.7 or later: QNetworkRequest::setTransferTimeout(std::chrono) and qt_standard_project_setup.
+find_package(Qt6 6.7 REQUIRED COMPONENTS Core Network Test)
 qt_standard_project_setup()
 
 # Core: the portable wake logic. Plain C++17, no Qt. This is what Milestone 1 shipped.

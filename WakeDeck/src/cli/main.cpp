@@ -103,12 +103,15 @@ std::string describePlan(const wakedeck::WakeTarget& target, std::size_t count) 
 // Fills `options` from the arguments after the command. Returns an exit code
 // on a usage error or help request, std::nullopt when everything parsed.
 std::optional<int> parseWakeArguments(const std::vector<std::string>& args, WakeOptions& options) {
+    // A help request wins wherever it appears, even after a mistyped option.
     for (std::size_t i = 1; i < args.size(); ++i) {
-        const std::string& flag = args[i];
-        if (flag == "--help" || flag == "-h") {
+        if (args[i] == "--help" || args[i] == "-h") {
             printWakeUsage(std::cout);
             return 0;
         }
+    }
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& flag = args[i];
         if (flag == "--dry-run") {
             options.dryRun = true;
             continue;

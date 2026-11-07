@@ -62,9 +62,10 @@ QString explainTimeout(const Observations& o) {
                      .arg(o.check.host);
     }
     if (counts[ProbeStatus::Refused] > 0) {
-        lines << QStringLiteral("- The computer is up: it refused the connection on port %1, so the service is not "
-                                "listening there yet. Give it more time, or check that the service runs and uses "
-                                "this port.")
+        lines << QStringLiteral("- Something at that address refused the connection on port %1. Usually that is the "
+                                "computer itself, awake but with the service not listening there yet; a router or "
+                                "VPN endpoint can answer the same way. Give it more time, or check that the service "
+                                "runs and uses this port.")
                      .arg(port);
     }
     if (counts[ProbeStatus::NotReady] > 0) {

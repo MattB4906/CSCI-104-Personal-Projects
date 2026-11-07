@@ -82,11 +82,25 @@ private:
     bool ok_;
 };
 
+class FakeLauncher final : public Launcher {
+public:
+    FakeLauncher(bool ok, QObject* parent) : Launcher(parent), ok_(ok) {}
+    void start() override {
+        QTimer::singleShot(0, this, [this] {
+            emit finished(ok_, ok_ ? QStringLiteral("fake client launched") : QStringLiteral("fake client not found"));
+        });
+    }
+
+private:
+    bool ok_;
+};
+
 struct Script {
     std::vector<ProbeStatus> statuses;  // one per check; the last one repeats
     int probesCreated = 0;
     int wakersCreated = 0;
     bool wakeOk = true;
+    std::optional<bool> launchOk;  // when set, a FakeLauncher with this result replaces NoLauncher
 };
 
 SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
@@ -104,6 +118,9 @@ SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
         ++script->wakersCreated;
         return new FakeWaker(script->wakeOk, parent);
     };
+    if (script->launchOk.has_value()) {
+        factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(*script->launchOk, parent); };
+    }
     return factories;
 }
 
@@ -189,6 +206,14 @@ private slots:
         QCOMPARE(result.detail, QStringLiteral("state busy"));
     }
 
+    void serverInfoWithoutStatusCodeIsAccepted() {
+        // Sunshine always sends status_code; a reply without it is still read, on purpose.
+        const ProbeResult result = SunshineProbe::interpretServerInfo(
+            "<root><hostname>PC</hostname><state>SUNSHINE_SERVER_FREE</state></root>");
+        QVERIFY(result.ready());
+        QCOMPARE(result.detail, QStringLiteral("hostname PC, state free"));
+    }
+
     void serverInfoRejectsOtherReplies() {
         QCOMPARE(SunshineProbe::interpretServerInfo("<html><body>router login</body></html>").status, ProbeStatus::NotReady);
         QCOMPARE(SunshineProbe::interpretServerInfo("not xml at all").status, ProbeStatus::NotReady);
@@ -257,6 +282,20 @@ private slots:
         QVERIFY(result.detail.contains(QStringLiteral("404")));
     }
 
+    void sunshineProbeTimesOutOnSilentServer() {
+        QTcpServer silent;  // accepts the connection and never answers
+        QVERIFY(silent.listen(QHostAddress::LocalHost, 0));
+        ProbeTarget target;
+        target.host = QStringLiteral("127.0.0.1");
+        target.port = silent.serverPort();
+        target.timeoutMs = 300;
+        QObject parent;
+        const ProbeResult result = runProbe(makeProbe(target, &parent));
+        QCOMPARE(result.status, ProbeStatus::TimedOut);
+        QVERIFY2(result.detail.contains(QStringLiteral("300 ms")), qPrintable(result.detail));
+        QVERIFY2(result.elapsedMs >= 250, qPrintable(QString::number(result.elapsedMs)));
+    }
+
     void sunshineProbeRefused() {
         ProbeTarget target;
         target.host = QStringLiteral("127.0.0.1");
@@ -311,6 +350,25 @@ private slots:
             ++received;
         }
         QCOMPARE(received, 3);
+    }
+
+    void wakerRejectsEmptyPlan() {
+        WakeTarget target;
+        target.destination = "127.0.0.1";
+        target.ports = {};
+        const WakeConfig config{*MacAddress::parse("00:00:5E:00:53:2A"), target};
+        std::optional<bool> ok;
+        QString summary;
+        QObject parent;
+        Waker* waker = makeWaker(config, &parent);
+        connect(waker, &Waker::finished, [&](bool allSent, const QString& text) {
+            ok = allSent;
+            summary = text;
+        });
+        waker->start();
+        QVERIFY(QTest::qWaitFor([&ok] { return ok.has_value(); }, 5000));
+        QVERIFY(!*ok);
+        QVERIFY2(summary.contains(QStringLiteral("nothing to send")), qPrintable(summary));
     }
 
     void wakerReportsResolutionFailure() {
@@ -394,6 +452,47 @@ private slots:
         QCOMPARE(session.state(), SessionState::Failed);
     }
 
+    void sessionLaunchFailure() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Ready};
+        script->launchOk = false;
+        Session session(quickConfig(true), fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::LaunchFailed);
+        QVERIFY(run.hasKind(EventKind::Ready));
+        QVERIFY(run.hasKind(EventKind::Failure));
+        QVERIFY2(run.summary.contains(QStringLiteral("fake client not found")), qPrintable(run.summary));
+        QCOMPARE(session.state(), SessionState::Failed);
+    }
+
+    void sessionLaunchSuccessAfterWake() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut, ProbeStatus::Ready};
+        script->launchOk = true;
+        Session session(quickConfig(true), fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
+        QVERIFY(run.hasEvent(QStringLiteral("fake client launched")));
+        QCOMPARE(session.state(), SessionState::Done);
+    }
+
+    void sessionKeepWaitingExtendsTheTimeout() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        SessionConfig config = quickConfig(false);
+        config.overallTimeoutMs = 60;
+        Session session(config, fakeFactories(script));
+        QTimer::singleShot(10, &session, [&session] { session.extendTimeout(300); });
+        QElapsedTimer clock;
+        clock.start();
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TimedOut);
+        QVERIFY2(clock.elapsed() >= 250, qPrintable(QString::number(clock.elapsed())));
+    }
+
     void sessionWithoutWakeOnlyWaits() {
         auto script = std::make_shared<Script>();
         script->statuses = {ProbeStatus::Refused, ProbeStatus::Ready};
@@ -445,7 +544,7 @@ private slots:
         QVERIFY(!text.contains(QStringLiteral("refused")));
     }
 
-    void explainRefusedMeansTheComputerIsUp() {
+    void explainRefusedPointsAtTheService() {
         Observations o;
         o.check.host = QStringLiteral("192.168.1.20");
         o.check.port = 47989;
@@ -459,7 +558,9 @@ private slots:
         }
         const QString text = explainTimeout(o);
         QVERIFY2(text.contains(QStringLiteral("3 timed out, 2 refused")), qPrintable(text));
+        QVERIFY(text.contains(QStringLiteral("refused the connection")));
         QVERIFY(text.contains(QStringLiteral("not listening")));
+        QVERIFY(!text.contains(QStringLiteral("The computer is up")));  // never claims on or off
         QVERIFY(text.contains(QStringLiteral("No wake request is configured")));
         QVERIFY(!text.contains(QStringLiteral("Tailscale")));
         QVERIFY(!text.contains(QStringLiteral("never answered")));

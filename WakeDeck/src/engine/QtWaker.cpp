@@ -80,7 +80,8 @@ void QtWaker::sendNext() {
 void QtWaker::finish() {
     if (done_) return;
     done_ = true;
-    const bool allSent = errors_.isEmpty() && sent_ == plan_.size();
+    if (plan_.empty()) errors_ << QStringLiteral("nothing to send: no ports or zero repeats configured");
+    const bool allSent = !plan_.empty() && errors_.isEmpty() && sent_ == plan_.size();
     const QString requested = QString::fromStdString(config_.target.destination);
     const QString resolved = QString::fromStdString(destination_.dotted);
     const QString where = resolved.isEmpty() || resolved == requested
