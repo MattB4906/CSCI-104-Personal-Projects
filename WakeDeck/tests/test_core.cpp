@@ -1,5 +1,6 @@
 // Unit tests for the WakeDeck core. No sockets: sendWake is exercised through
 // a recording sink, so these tests run anywhere and never touch the network.
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -89,6 +90,36 @@ void testMagicPacket() {
     }
     CHECK(repetitionsOk);
     CHECK(packet.toHex().rfind("FF FF FF FF FF FF 00 00 5E 00 53 2A", 0) == 0);
+
+    // The whole hex dump must decode back to the same 102 bytes, laid out as
+    // upper-case pairs, 16 per line, each line ended by a newline.
+    const std::string hex = packet.toHex();
+    CHECK(hex.size() == MagicPacket::kSize * 3);  // two digits plus one separator per byte
+    const auto hexDigit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::vector<std::uint8_t> decoded;
+    std::size_t newlines = 0;
+    bool layoutOk = true;
+    for (std::size_t i = 0; i + 3 <= hex.size(); i += 3) {
+        const int high = hexDigit(hex[i]);
+        const int low = hexDigit(hex[i + 1]);
+        if (high < 0 || low < 0) {
+            layoutOk = false;
+            break;
+        }
+        decoded.push_back(static_cast<std::uint8_t>(high * 16 + low));
+        const bool endOfLine = decoded.size() % 16 == 0 || decoded.size() == MagicPacket::kSize;
+        const char separator = hex[i + 2];
+        if (separator != (endOfLine ? '\n' : ' ')) layoutOk = false;
+        if (separator == '\n') ++newlines;
+    }
+    CHECK(layoutOk);
+    CHECK(newlines == 7);
+    CHECK((decoded.size() == MagicPacket::kSize &&
+           std::equal(decoded.begin(), decoded.end(), packet.bytes().begin())));
 }
 
 void testPortList() {
@@ -206,9 +237,9 @@ void testResolveNumeric() {
     CHECK(documentation && documentation->dotted == "192.0.2.255");
     const auto limited = resolveIPv4("255.255.255.255", &error);
     CHECK(limited && limited->dotted == "255.255.255.255");
-    const auto loopback = resolveIPv4("localhost", &error);
+    const auto loopback = resolveIPv4("127.0.0.1", &error);
     CHECK(loopback && loopback->dotted == "127.0.0.1");
-    CHECK(!resolveIPv4("", &error));
+    CHECK(!resolveIPv4("", &error));  // nothing to resolve; no name lookup happens here
 }
 
 }  // namespace

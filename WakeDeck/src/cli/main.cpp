@@ -95,6 +95,10 @@ std::string describePlan(const wakedeck::WakeTarget& target, std::size_t count) 
 std::optional<int> parseArguments(const std::vector<std::string>& args, Options& options) {
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& flag = args[i];
+        if (flag == "--help" || flag == "-h") {
+            printUsage(std::cout);
+            return 0;
+        }
         if (flag == "--dry-run") {
             options.dryRun = true;
             continue;
@@ -166,7 +170,8 @@ int main(int argc, char** argv) {
               << "Plan          " << describePlan(target, plan.size()) << "\n";
 
     if (options.dryRun) {
-        std::cout << "\nDry run: nothing was sent. Packet bytes (" << packet.size() << "):\n" << packet.toHex();
+        std::cout << "\nDry run: nothing was sent and the destination was not resolved (no network use at all).\n"
+                  << "Packet bytes (" << packet.size() << "):\n" << packet.toHex();
         return 0;
     }
 

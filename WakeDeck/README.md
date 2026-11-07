@@ -19,7 +19,7 @@ The finished app will let anyone add their own computers in a graphical interfac
 
 - Builds the 102-byte magic packet from a MAC address written as `00:00:5E:00:53:2A`, `00-00-5E-00-53-2A` or `00005E00532A`. Anything else is rejected before a packet exists.
 - Sends it over UDP to an IPv4 address or host name, including broadcast addresses, to a list of ports in order, a configurable number of times per port, with a pause between packets. Defaults: port 9 then port 7, five packets each, 100 ms apart.
-- `--dry-run` prints the plan and the packet bytes without sending anything.
+- `--dry-run` prints the plan and the packet bytes without sending anything and without resolving the destination, so it never touches the network.
 - Reports honestly. "Sent" means the packets left this computer, nothing more, and every failed send is listed.
 - Tests cover the parsing, the packet layout, the send order and the real socket code, the last one over the loopback interface only.
 
@@ -53,7 +53,8 @@ Once the PC is up, a VPN such as Tailscale gives it a stable address from anywhe
 | `src/cli/main.cpp` | Argument parsing, exit codes and output of `wakedeck-cli`. |
 | `tests/check.h` | A dozen lines of test helpers, no framework. |
 | `tests/test_core.cpp` | Unit tests with a recording sink instead of sockets. |
-| `tests/test_loopback.cpp` | Sends through the real `UdpSender` to a listener on 127.0.0.1 and checks the bytes that arrive. |
+| `tests/test_loopback.cpp` | Sends through the real `UdpSender` to a listener on 127.0.0.1 and checks the bytes that arrive; also forces the "socket cannot open" path. |
+| `tests/cli_test.sh` | Runs the built tool with `--dry-run` and invalid inputs, checking exit codes and output. |
 | `Makefile` | `make`, `make test`, `make run`, `make clean`. |
 
 ### Object Relationships
@@ -106,12 +107,13 @@ Tip: keep your own values out of this repository. A shell alias or a small scrip
 
 ## Verification
 
-`make test` builds and runs two executables:
+`make test` builds and runs two executables and one script:
 
-- `test_core`: MAC parsing (accepted and rejected forms), packet layout (sync bytes, sixteen repetitions), port-list parsing, plan expansion order (port 9 five times, then port 7 five times), `sendWake` through a recording sink including a simulated failing port, and numeric address resolution.
-- `test_loopback`: binds a UDP listener on `127.0.0.1`, sends three packets through the real `UdpSender`, and checks that each one arrives as exactly 102 bytes with the expected content. No packet leaves the machine.
+- `test_core`: MAC parsing (accepted and rejected forms), packet layout (sync bytes, sixteen repetitions, the full hex dump decoded back), port-list parsing, plan expansion order (port 9 five times, then port 7 five times), `sendWake` through a recording sink including a simulated failing port, and numeric address resolution. No name lookups, no sockets.
+- `test_loopback`: binds a UDP listener on `127.0.0.1`, sends three packets through the real `UdpSender`, and checks that each one arrives as exactly 102 bytes with the expected content. It then blocks descriptor creation for a moment and checks that a sender which cannot open its socket reports the failure. No packet leaves the machine.
+- `tests/cli_test.sh`: runs the built tool through its usage errors and `--dry-run` paths and checks exit codes and output text. Exit codes 2 and 3 need a real network and are not covered automatically.
 
-Both print `N/N checks passed` and return a non-zero exit code on any failure, so `make test` fails loudly.
+All three print `N/N checks passed` and return a non-zero exit code on any failure, so `make test` fails loudly.
 
 ## Current Scope
 

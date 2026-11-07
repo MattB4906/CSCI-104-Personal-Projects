@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -76,5 +77,23 @@ int main() {
     }
 
     ::close(listener);
+
+    // A sender whose socket cannot be opened must say so instead of pretending
+    // to send. Refusing every new descriptor for a moment forces that path.
+    rlimit saved{};
+    CHECK(::getrlimit(RLIMIT_NOFILE, &saved) == 0);
+    rlimit none = saved;
+    none.rlim_cur = 0;
+    CHECK(::setrlimit(RLIMIT_NOFILE, &none) == 0);
+    {
+        UdpSender blocked;
+        CHECK(::setrlimit(RLIMIT_NOFILE, &saved) == 0);  // restore before anything else
+        CHECK(!blocked.isOpen());
+        CHECK(!blocked.openError().empty());
+        const std::uint8_t byte = 0;
+        const auto error = blocked.send(*destination, port, &byte, 1);
+        CHECK(error.has_value());
+    }
+
     return check::finish("test_loopback");
 }

@@ -28,10 +28,11 @@ std::optional<std::uint16_t> parsePort(std::string_view entry) {
 
 std::vector<WakeStep> expandWakePlan(const WakeTarget& target) {
     std::vector<WakeStep> steps;
-    steps.reserve(target.ports.size() * target.repeat);
     for (std::uint16_t port : target.ports) {
-        for (unsigned attempt = 1; attempt <= target.repeat; ++attempt) {
-            steps.push_back(WakeStep{port, attempt});
+        // Count from zero with "<": a "<= repeat" loop would never end when
+        // repeat is the largest unsigned value. Attempts are reported 1-based.
+        for (unsigned done = 0; done < target.repeat; ++done) {
+            steps.push_back(WakeStep{port, done + 1});
         }
     }
     return steps;

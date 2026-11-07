@@ -39,8 +39,9 @@ $(BUILD_DIR)/test_%: tests/test_%.cpp tests/check.h $(CORE_OBJS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $< $(CORE_OBJS) -o $@
 
-test: $(TESTS)
+test: $(TESTS) $(CLI)
 	@for t in $(TESTS); do echo "== $$t"; "$$t" || exit 1; done
+	@echo "== tests/cli_test.sh"; sh tests/cli_test.sh $(CLI)
 
 run: cli
 	$(CLI) $(ARGS)
