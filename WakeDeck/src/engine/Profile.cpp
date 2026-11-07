@@ -5,9 +5,30 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <initializer_list>
 
 namespace wakedeck {
 namespace {
+
+// A mistyped field name would otherwise be ignored and silently replaced by
+// the default, so every object may contain only the fields it is known for.
+bool onlyKnownFields(const QJsonObject& object, std::initializer_list<const char*> known, const QString& where,
+                     QString* error) {
+    for (const QString& key : object.keys()) {
+        bool found = false;
+        for (const char* name : known) {
+            if (key == QLatin1String(name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            *error = QStringLiteral("%1 has an unknown field \"%2\"").arg(where, key);
+            return false;
+        }
+    }
+    return true;
+}
 
 // Reads an optional whole-number field with bounds; absent means `fallback`.
 std::optional<int> intField(const QJsonObject& object, const char* key, int fallback, int min, int max,
@@ -41,6 +62,7 @@ std::optional<ProbeTarget> checkFromJson(const QJsonValue& value, QString* error
     }
     const QJsonObject object = value.toObject();
     const QString where = QStringLiteral("check");
+    if (!onlyKnownFields(object, {"kind", "host", "port", "timeoutMs"}, where, error)) return std::nullopt;
     ProbeTarget target;
 
     const auto host = stringField(object, "host", QString(), where, error);
@@ -76,6 +98,9 @@ std::optional<WakeConfig> wakeFromJson(const QJsonValue& value, QString* error) 
     }
     const QJsonObject object = value.toObject();
     const QString where = QStringLiteral("wake");
+    if (!onlyKnownFields(object, {"method", "mac", "destination", "ports", "repeat", "intervalMs"}, where, error)) {
+        return std::nullopt;
+    }
 
     const auto method = stringField(object, "method", QStringLiteral("magicPacket"), where, error);
     if (!method) return std::nullopt;
@@ -131,6 +156,9 @@ std::optional<ClientConfig> clientFromJson(const QJsonValue& value, QString* err
     }
     const QJsonObject object = value.toObject();
     const QString where = QStringLiteral("client");
+    if (!onlyKnownFields(object, {"preset", "path", "launchMode", "appName", "arguments"}, where, error)) {
+        return std::nullopt;
+    }
     ClientConfig client;
 
     const auto preset = stringField(object, "preset", QStringLiteral("none"), where, error);
@@ -168,10 +196,36 @@ std::optional<ClientConfig> clientFromJson(const QJsonValue& value, QString* err
             client.arguments << entry.toString();
         }
     }
+    const QString inconsistency = clientConfigError(client);
+    if (!inconsistency.isEmpty()) {
+        *error = QStringLiteral("client: %1").arg(inconsistency);
+        return std::nullopt;
+    }
     return client;
 }
 
 }  // namespace
+
+QString clientConfigError(const ClientConfig& client) {
+    const bool stream = client.launchMode == QLatin1String("stream");
+    switch (client.preset) {
+    case ClientConfig::Preset::None:
+        if (!client.path.isEmpty()) return QStringLiteral("a client path needs a client (moonlight or custom)");
+        if (stream || !client.appName.isEmpty()) return QStringLiteral("stream mode and an app name need the moonlight client");
+        if (!client.arguments.isEmpty()) return QStringLiteral("arguments need the custom client");
+        break;
+    case ClientConfig::Preset::Moonlight:
+        if (stream && client.appName.isEmpty()) return QStringLiteral("stream mode needs the name of the app to stream");
+        if (!stream && !client.appName.isEmpty()) return QStringLiteral("an app name is only used in stream mode");
+        if (!client.arguments.isEmpty()) return QStringLiteral("arguments need the custom client");
+        break;
+    case ClientConfig::Preset::Custom:
+        if (client.path.isEmpty()) return QStringLiteral("the custom client needs a path");
+        if (stream || !client.appName.isEmpty()) return QStringLiteral("stream mode and an app name need the moonlight client");
+        break;
+    }
+    return QString();
+}
 
 QString presetName(ClientConfig::Preset preset) {
     switch (preset) {
@@ -258,6 +312,10 @@ std::optional<Profile> profileFromJson(const QJsonObject& json, QString* error) 
     QString* reason = error ? error : &ignored;
     const QString where = QStringLiteral("profile");
 
+    if (!onlyKnownFields(json, {"schemaVersion", "name", "notes", "check", "wake", "pollIntervalMs", "overallTimeoutMs", "client"},
+                         where, reason)) {
+        return std::nullopt;
+    }
     if (json.contains(QLatin1String("schemaVersion"))) {
         const int version = json.value(QLatin1String("schemaVersion")).toInt(-1);
         if (version > Profile::kSchemaVersion) {

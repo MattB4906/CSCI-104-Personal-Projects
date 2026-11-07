@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 0.2.0 LANGUAGES CXX)
+project(WakeDeck VERSION 0.3.0 LANGUAGES CXX)
+set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}-m3")  # the one place the version is written
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +58,7 @@ add_executable(wakedeck-cli
   src/cli/ProfileCommand.h
   src/cli/ProfileCommand.cpp)
 target_link_libraries(wakedeck-cli PRIVATE wakedeck_engine)
+target_compile_definitions(wakedeck-cli PRIVATE WAKEDECK_VERSION="${WAKEDECK_VERSION_STRING}")
 
 enable_testing()
 

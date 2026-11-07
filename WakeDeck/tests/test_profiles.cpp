@@ -141,6 +141,35 @@ private slots:
         QTest::newRow("arguments not list") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"arguments": "x"}})") << QStringLiteral("arguments");
         QTest::newRow("newer schema") << QByteArray(R"({"schemaVersion": 2, "name": "X", "check": {"host": "h"}})") << QStringLiteral("newer");
         QTest::newRow("schema zero") << QByteArray(R"({"schemaVersion": 0, "name": "X", "check": {"host": "h"}})") << QStringLiteral("schemaVersion");
+        // Client rules, identical to the command line's.
+        QTest::newRow("custom without path") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "custom"}})") << QStringLiteral("path");
+        QTest::newRow("stream without app") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "launchMode": "stream"}})") << QStringLiteral("app");
+        QTest::newRow("app without stream") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "appName": "Desktop"}})") << QStringLiteral("stream");
+        QTest::newRow("none with path") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"path": "/x"}})") << QStringLiteral("client");
+        QTest::newRow("none with stream") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"launchMode": "stream", "appName": "Desktop"}})") << QStringLiteral("moonlight");
+        QTest::newRow("custom with stream") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "custom", "path": "/x", "launchMode": "stream", "appName": "D"}})") << QStringLiteral("moonlight");
+        QTest::newRow("moonlight with arguments") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "arguments": ["a"]}})") << QStringLiteral("custom");
+        // Mistyped field names are reported instead of silently replaced by defaults.
+        QTest::newRow("unknown top-level field") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "pollIntervalMS": 1})") << QStringLiteral("pollIntervalMS");
+        QTest::newRow("unknown check field") << QByteArray(R"({"name": "X", "check": {"host": "h", "timeoutMS": 9}})") << QStringLiteral("timeoutMS");
+        QTest::newRow("unknown wake field") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "port": 9}})") << QStringLiteral("\"port\"");
+        QTest::newRow("unknown client field") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "app": "Desktop"}})") << QStringLiteral("\"app\"");
+    }
+
+    void consistentClientsAreAccepted() {
+        const char* const moonlightWithPath =
+            R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "path": "/Applications/Moonlight.app"}})";
+        const char* const moonlightStreaming =
+            R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "launchMode": "stream", "appName": "Desktop"}})";
+        const char* const customWithArguments =
+            R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "custom", "path": "/usr/bin/open", "arguments": ["rdp://{host}"]}})";
+        for (const char* json : {moonlightWithPath, moonlightStreaming, customWithArguments}) {
+            QString error;
+            const bool accepted = profileFromJson(parse(json), &error).has_value();
+            QVERIFY2(accepted, qPrintable(error));
+        }
+        ClientConfig none;
+        QVERIFY(clientConfigError(none).isEmpty());
     }
 
     void invalidJsonIsRejectedWithAReason() {
@@ -262,6 +291,49 @@ private slots:
         QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.json.corrupt-")).size(), 1);
     }
 
+    void corruptStoreTwiceWithinASecondIsStillRecovered() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        const ProfileStore store(path);
+        for (int round = 0; round < 2; ++round) {
+            QVERIFY(writeText(path, "still not json"));
+            const ProfileStore::LoadResult loaded = store.load();
+            QVERIFY2(loaded.ok, qPrintable(loaded.error));
+            QVERIFY2(loaded.warning.contains(QStringLiteral("It was moved")), qPrintable(loaded.warning));
+        }
+        QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.json.corrupt-")).size(), 2);
+    }
+
+    void invalidTopLevelSchemaVersionIsCorrupt() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        QVERIFY(writeText(path, R"({"schemaVersion": 0, "profiles": []})"));
+        const ProfileStore::LoadResult loaded = ProfileStore(path).load();
+        QVERIFY(loaded.ok);
+        QVERIFY(loaded.profiles.empty());
+        QVERIFY2(loaded.warning.contains(QStringLiteral("schemaVersion")), qPrintable(loaded.warning));
+        QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.json.corrupt-")).size(), 1);
+    }
+
+    void singleProfileFileIsNotAStore() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("one.json"));
+        QString error;
+        QVERIFY(ProfileStore::writeProfileFile(fullProfile(), path, &error));
+        QFile before(path);
+        QVERIFY(before.open(QIODevice::ReadOnly));
+        const QByteArray content = before.readAll();
+        before.close();
+
+        const ProfileStore::LoadResult loaded = ProfileStore(path).load();
+        QVERIFY(!loaded.ok);
+        QVERIFY2(loaded.error.contains(QStringLiteral("single profile")), qPrintable(loaded.error));
+        QFile after(path);
+        QVERIFY(after.open(QIODevice::ReadOnly));
+        QCOMPARE(after.readAll(), content);
+        QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("one.json.")).size(), 0);
+    }
+
     void storeWithoutProfilesListIsCorrupt() {
         QTemporaryDir dir;
         const QString path = dir.filePath(QStringLiteral("profiles.json"));
@@ -301,7 +373,13 @@ private slots:
         QCOMPARE(loaded.profiles.front().name, QStringLiteral("Good"));
         QVERIFY2(loaded.warning.contains(QStringLiteral("Skipped 2")), qPrintable(loaded.warning));
         QVERIFY(loaded.warning.contains(QStringLiteral("Broken")));
+        QVERIFY(loaded.warning.contains(QStringLiteral("is kept as")));
         QVERIFY(QFile::exists(path));
+        QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.json.invalid-")).size(), 1);
+
+        // Reading the same file again keeps the one copy instead of adding another.
+        const ProfileStore::LoadResult again = ProfileStore(path).load();
+        QVERIFY(again.ok);
         QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.json.invalid-")).size(), 1);
     }
 

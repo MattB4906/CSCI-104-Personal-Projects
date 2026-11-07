@@ -1,5 +1,6 @@
 #include "ProfileCommand.h"
 
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <iostream>
 #include <set>
@@ -42,8 +43,9 @@ int saveOrExplain(const ProfileStore& store, const std::vector<Profile>& profile
 
 void printProfile(const Profile& profile) {
     std::cout << text(profile.name) << "\n"
-              << "  check:  " << text(describe(profile.check)) << " (poll " << profile.pollIntervalMs / 1000
-              << " s, up to " << text(formatDuration(profile.overallTimeoutMs)) << ")\n"
+              << "  check:  " << text(describe(profile.check)) << " (poll "
+              << text(QString::number(profile.pollIntervalMs / 1000.0)) << " s, up to "
+              << text(formatDuration(profile.overallTimeoutMs)) << ")\n"
               << "  wake:   " << (profile.wake ? text(describe(*profile.wake)) : std::string("none configured")) << "\n"
               << "  client: " << text(describe(profile.client)) << "\n";
     if (!profile.notes.isEmpty()) std::cout << "  notes:  " << text(profile.notes) << "\n";
@@ -131,6 +133,9 @@ int importFile(const ProfileStore& store, const QString& file, bool replace) {
 }
 
 int exportFile(const ProfileStore& store, const QString& name, const QString& file) {
+    if (QFileInfo(file).absoluteFilePath() == QFileInfo(store.path()).absoluteFilePath()) {
+        return problem(QStringLiteral("refusing to export over the profiles file itself (%1); choose another file name").arg(file));
+    }
     std::vector<Profile> profiles;
     if (!loadOrExplain(store, profiles)) return kExitProblem;
     const Profile* profile = findProfile(profiles, name);

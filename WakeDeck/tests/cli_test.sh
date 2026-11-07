@@ -98,7 +98,12 @@ contains "profile list shows the profile" "Test PC" -- profile list --store "$ST
 contains "profile list shows the wake" "4 packets to 127.0.0.1" -- profile list --store "$STORE"
 contains "profile show prints JSON" "\"mac\": \"00:00:5E:00:53:2A\"" -- profile show "Test PC" --store "$STORE"
 expect 2 "profile show unknown name" -- profile show "Nobody" --store "$STORE"
+expect 1 "client path without a client" -- profile add --store "$STORE" --name "Odd" --check-host 127.0.0.1 --client-path /x
 expect 0 "profile export" -- profile export "Test PC" "$STOREDIR/exported.json" --store "$STORE"
+expect 2 "export over the store itself is refused" -- profile export "Test PC" "$STORE" --store "$STORE"
+contains "store survives the refused export" "Test PC" -- profile list --store "$STORE"
+expect 2 "a single-profile file is not a store" -- profile list --store "$STOREDIR/exported.json"
+contains "single-profile file is left alone" "\"name\": \"Test PC\"" -- profile show "Test PC" --store "$STORE"
 expect 2 "profile import of an existing name" -- profile import "$STOREDIR/exported.json" --store "$STORE"
 expect 0 "profile import with --replace" -- profile import "$STOREDIR/exported.json" --replace --store "$STORE"
 expect 0 "profile import of the example" -- profile import "$EXAMPLES/example-profile.json" --store "$STORE"
@@ -115,7 +120,9 @@ expect 2 "profile remove twice" -- profile remove "Living Room PC (example)" --s
 printf 'this is not json' > "$STORE"
 expect 0 "corrupt store is recovered" -- profile list --store "$STORE"
 printf 'this is not json' > "$STORE"
-contains "corrupt store warns" "moved" -- profile list --store "$STORE"
+expect 0 "corrupt store recovered again within the same second" -- profile list --store "$STORE"
+printf 'this is not json' > "$STORE"
+contains "corrupt store warns" "It was moved" -- profile list --store "$STORE"
 rm -rf "$STOREDIR"
 contains "dry run plan line" "10 packets: port 9 x5, port 7 x5, 100 ms apart" -- wake --mac "$MAC" --to "$TO" --dry-run
 contains "dry run sends nothing" "nothing was sent" -- wake --mac "$MAC" --to "$TO" --dry-run

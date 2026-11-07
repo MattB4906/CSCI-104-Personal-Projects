@@ -30,6 +30,10 @@ QString presetName(ClientConfig::Preset preset);  // "none", "moonlight", "custo
 std::optional<ClientConfig::Preset> presetFromName(const QString& name);
 QString describe(const ClientConfig& client);  // "Moonlight, stream \"Desktop\"" / "none"
 
+// The one set of rules for a consistent client, used for JSON and for the
+// command line alike. Empty when the configuration is fine, otherwise the reason.
+QString clientConfigError(const ClientConfig& client);
+
 struct Profile {
     static constexpr int kSchemaVersion = 1;
 

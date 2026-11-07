@@ -27,7 +27,10 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.3.0-m3";
+#ifndef WAKEDECK_VERSION
+#define WAKEDECK_VERSION "0.0.0-dev"  // CMake defines the real one from the project version
+#endif
+constexpr const char* kVersion = WAKEDECK_VERSION;
 
 void printGeneralUsage(std::ostream& out) {
     out << "WakeDeck command-line tool " << kVersion << "\n"

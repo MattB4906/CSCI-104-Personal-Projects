@@ -1,5 +1,6 @@
 #include "ProfileStore.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -10,13 +11,21 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QStringList>
+#include <cmath>
 #include <utility>
 
 namespace wakedeck {
 namespace {
 
-QString timestamp() {
-    return QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+// "<base>-<date>-<time>" that does not exist yet; a counter is added when the
+// same second already produced one, since rename never overwrites.
+QString unusedPath(const QString& base) {
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    QString candidate = base + stamp;
+    for (int n = 2; QFile::exists(candidate); ++n) {
+        candidate = base + stamp + QStringLiteral("-%1").arg(n);
+    }
+    return candidate;
 }
 
 bool writeJsonAtomically(const QString& path, const QJsonDocument& document, QString* error) {
@@ -59,9 +68,10 @@ ProfileStore::LoadResult ProfileStore::load() const {
         result.error = QStringLiteral("cannot read %1: %2").arg(path_, file.errorString());
         return result;
     }
-    QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    const QByteArray data = file.readAll();
     file.close();
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(data, &parseError);
 
     QString corruptReason;
     if (document.isNull()) {
@@ -69,22 +79,32 @@ ProfileStore::LoadResult ProfileStore::load() const {
     } else if (!document.isObject()) {
         corruptReason = QStringLiteral("does not contain a JSON object");
     } else {
-        const int version = document.object().value(QLatin1String("schemaVersion")).toInt(1);
-        if (version > Profile::kSchemaVersion) {
+        const QJsonObject root = document.object();
+        const QJsonValue versionValue = root.value(QLatin1String("schemaVersion"));
+        const double version = versionValue.toDouble(-1);
+        if (!versionValue.isUndefined() && (!versionValue.isDouble() || version != std::floor(version) || version < 1)) {
+            corruptReason = QStringLiteral("has an invalid schemaVersion");
+        } else if (version > Profile::kSchemaVersion) {
             result.error = QStringLiteral("%1 was written by a newer WakeDeck (schema %2). Update WakeDeck; "
                                           "the file was left untouched.")
                                .arg(path_)
-                               .arg(version);
+                               .arg(static_cast<int>(version));
             return result;
-        }
-        if (!document.object().value(QLatin1String("profiles")).isArray()) {
+        } else if (!root.value(QLatin1String("profiles")).isArray()) {
+            if (root.contains(QLatin1String("name")) && root.contains(QLatin1String("check"))) {
+                // Somebody pointed --store at an exported profile: say so, touch nothing.
+                result.error = QStringLiteral("%1 is a single profile file, not a profiles store. Import it with "
+                                              "\"wakedeck-cli profile import %1\" instead; it was left untouched.")
+                                   .arg(path_);
+                return result;
+            }
             corruptReason = QStringLiteral("has no \"profiles\" list");
         }
     }
 
     if (!corruptReason.isEmpty()) {
         // Keep the unreadable file for the user to inspect; start with an empty list.
-        const QString aside = path_ + QStringLiteral(".corrupt-") + timestamp();
+        const QString aside = unusedPath(path_ + QStringLiteral(".corrupt-"));
         if (!QFile::rename(path_, aside)) {
             result.error = QStringLiteral("%1 %2 and could not be moved aside").arg(path_, corruptReason);
             return result;
@@ -111,12 +131,19 @@ ProfileStore::LoadResult ProfileStore::load() const {
         result.profiles.push_back(std::move(*profile));
     }
     if (!skipped.isEmpty()) {
-        const QString copy = path_ + QStringLiteral(".invalid-") + timestamp();
-        QFile::copy(path_, copy);
-        result.warning = QStringLiteral("Skipped %1 unreadable profile(s) in %2: %3. A copy of the original file was "
-                                        "kept as %4; saving will drop the skipped entries.")
+        // One copy per distinct content, named by a hash of it, so repeated reads
+        // of the same file do not pile up copies.
+        const QString hash = QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Sha1).toHex().left(8));
+        const QString copy = path_ + QStringLiteral(".invalid-") + hash;
+        const bool kept = QFile::exists(copy) || QFile::copy(path_, copy);
+        result.warning = QStringLiteral("Skipped %1 unreadable profile(s) in %2: %3. %4")
                              .arg(skipped.size())
-                             .arg(path_, skipped.join(QStringLiteral("; ")), copy);
+                             .arg(path_, skipped.join(QStringLiteral("; ")),
+                                  kept ? QStringLiteral("A copy of the original file is kept as %1; saving will drop the "
+                                                        "skipped entries.")
+                                             .arg(copy)
+                                       : QStringLiteral("A copy of the original file could not be written next to it; "
+                                                        "saving would drop the skipped entries."));
     }
     result.ok = true;
     return result;

@@ -153,16 +153,10 @@ std::optional<ClientConfig> clientConfigFromFlags(const Flags& flags, std::strin
     }
     client.launchMode = QString::fromStdString(launch);
     client.appName = QString::fromStdString(flags.valueOr("--app", "")).trimmed();
-    if (client.preset == ClientConfig::Preset::Custom && client.path.isEmpty()) {
-        error = "--client custom needs --client-path";
-        return std::nullopt;
-    }
-    if (client.preset != ClientConfig::Preset::Moonlight && (launch == "stream" || !client.appName.isEmpty())) {
-        error = "--launch stream and --app apply to --client moonlight only";
-        return std::nullopt;
-    }
-    if (client.preset == ClientConfig::Preset::Moonlight && launch == "stream" && client.appName.isEmpty()) {
-        error = "--launch stream needs --app <name of the app to stream>";
+    // The same rules as for a profile file, so nothing half-configured gets saved either way.
+    const QString inconsistency = clientConfigError(client);
+    if (!inconsistency.isEmpty()) {
+        error = "client options: " + inconsistency.toStdString();
         return std::nullopt;
     }
     return client;
