@@ -4,108 +4,17 @@
 #include <QDateTime>
 #include <QObject>
 #include <QTimer>
-#include <charconv>
-#include <chrono>
 #include <iostream>
-#include <map>
-#include <optional>
 #include <set>
-#include <string_view>
-#include <system_error>
 
-#include "core/MacAddress.h"
-#include "core/WakePlan.h"
+#include "Flags.h"
+#include "SessionFlags.h"
+#include "engine/ProfileStore.h"
 #include "engine/ServiceProbe.h"
 #include "engine/Session.h"
 
 namespace wakedeck::cli {
 namespace {
-
-// "--name value" pairs after the command, plus --help.
-struct Flags {
-    std::map<std::string, std::string> values;
-    bool help = false;
-
-    bool has(const char* flag) const { return values.count(flag) > 0; }
-    std::string valueOr(const char* flag, const char* fallback) const {
-        const auto it = values.find(flag);
-        return it == values.end() ? fallback : it->second;
-    }
-};
-
-std::optional<std::string> parseFlags(const std::vector<std::string>& args, const std::set<std::string>& known,
-                                      Flags& out) {
-    // A help request wins wherever it appears, even after a mistyped option.
-    for (std::size_t i = 1; i < args.size(); ++i) {
-        if (args[i] == "--help" || args[i] == "-h") {
-            out.help = true;
-            return std::nullopt;
-        }
-    }
-    for (std::size_t i = 1; i < args.size(); ++i) {
-        const std::string& flag = args[i];
-        if (known.count(flag) == 0) return "unknown option '" + flag + "'";
-        if (i + 1 >= args.size()) return flag + " needs a value";
-        out.values[flag] = args[++i];
-    }
-    return std::nullopt;
-}
-
-std::optional<unsigned> parseUnsigned(std::string_view text, unsigned min, unsigned max) {
-    unsigned value = 0;
-    const char* begin = text.data();
-    const char* end = begin + text.size();
-    const auto result = std::from_chars(begin, end, value);
-    if (result.ec != std::errc() || result.ptr != end) return std::nullopt;
-    if (value < min || value > max) return std::nullopt;
-    return value;
-}
-
-std::optional<ProbeKind> parseKind(const std::string& text) {
-    if (text == "sunshine") return ProbeKind::Sunshine;
-    if (text == "tcp") return ProbeKind::Tcp;
-    return std::nullopt;
-}
-
-int usageError(const std::string& message, void (*usage)(std::ostream&)) {
-    std::cerr << "error: " << message << "\n\n";
-    usage(std::cerr);
-    return 1;
-}
-
-// The check target, with the flag names each command uses.
-std::optional<ProbeTarget> buildTarget(const Flags& flags, const char* hostFlag, const char* portFlag,
-                                       const char* kindFlag, const char* timeoutFlag, std::string& error) {
-    ProbeTarget target;
-    if (!flags.has(hostFlag)) {
-        error = std::string(hostFlag) + " is required";
-        return std::nullopt;
-    }
-    target.host = QString::fromStdString(flags.valueOr(hostFlag, "")).trimmed();
-    if (target.host.isEmpty()) {
-        error = std::string(hostFlag) + " needs a host name or address";
-        return std::nullopt;
-    }
-    const auto port = parseUnsigned(flags.valueOr(portFlag, "47989"), 1, 65535);
-    if (!port) {
-        error = std::string(portFlag) + " must be a whole number from 1 to 65535";
-        return std::nullopt;
-    }
-    target.port = static_cast<quint16>(*port);
-    const auto kind = parseKind(flags.valueOr(kindFlag, "sunshine"));
-    if (!kind) {
-        error = std::string(kindFlag) + " must be sunshine or tcp";
-        return std::nullopt;
-    }
-    target.kind = *kind;
-    const auto timeout = parseUnsigned(flags.valueOr(timeoutFlag, "2000"), 100, 60000);
-    if (!timeout) {
-        error = std::string(timeoutFlag) + " must be a whole number of milliseconds from 100 to 60000";
-        return std::nullopt;
-    }
-    target.timeoutMs = static_cast<int>(*timeout);
-    return target;
-}
 
 std::string stamp(const QDateTime& at) {
     return at.toString(QStringLiteral("HH:mm:ss")).toStdString();
@@ -128,25 +37,30 @@ void printConnectUsage(std::ostream& out) {
            "  wakedeck-cli connect --check-host <host> [--check-port 47989] [--check sunshine|tcp]\n"
            "                       [--probe-timeout-ms 2000] [--poll-s 3] [--timeout-s 120]\n"
            "                       [--mac <address> --to <host> [--ports 9,7] [--repeat 5] [--interval-ms 100]]\n"
+           "  wakedeck-cli connect --profile <name> [--store <file>] [--poll-s 3] [--timeout-s 120]\n"
            "\n"
-           "Checks the service. If it is not ready and --mac/--to are given, sends the wake request,\n"
-           "then keeps checking until the service answers or --timeout-s runs out. Without --mac/--to\n"
-           "it only waits. Launching the client comes in a later milestone.\n"
+           "Checks the service. If it is not ready and a wake is configured, sends the wake request,\n"
+           "then keeps checking until the service answers or --timeout-s runs out. Without a wake it\n"
+           "only waits. With --profile the settings come from a saved profile (see `profile --help`);\n"
+           "only --poll-s and --timeout-s may be given alongside it. Launching the client comes in a\n"
+           "later milestone.\n"
            "\n"
-           "Exit codes: 0 ready, 1 usage error, 2 timed out, 3 wake request failed, 4 client not launched.\n";
+           "Exit codes: 0 ready, 1 usage error, 2 timed out or profile not found, 3 wake request failed,\n"
+           "            4 client not launched.\n";
 }
 
 int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
     Flags flags;
-    if (const auto error = parseFlags(args, {"--host", "--port", "--kind", "--timeout-ms"}, flags)) {
+    if (const auto error = parseFlags(args, {"--host", "--port", "--kind", "--timeout-ms"}, {}, flags)) {
         return usageError(*error, printCheckUsage);
     }
     if (flags.help) {
         printCheckUsage(std::cout);
         return 0;
     }
+    if (!flags.positional.empty()) return usageError("unexpected argument '" + flags.positional.front() + "'", printCheckUsage);
     std::string error;
-    const auto target = buildTarget(flags, "--host", "--port", "--kind", "--timeout-ms", error);
+    const auto target = probeTargetFromFlags(flags, "--host", "--port", "--kind", "--timeout-ms", error);
     if (!target) return usageError(error, printCheckUsage);
 
     QCoreApplication app(argc, argv);
@@ -172,51 +86,52 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
 
 int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
     Flags flags;
-    const std::set<std::string> known = {"--check-host", "--check-port", "--check", "--probe-timeout-ms", "--poll-s",
-                                         "--timeout-s", "--mac", "--to", "--ports", "--repeat", "--interval-ms"};
-    if (const auto error = parseFlags(args, known, flags)) return usageError(*error, printConnectUsage);
+    std::set<std::string> known = sessionValueFlags();
+    known.insert("--profile");
+    known.insert("--store");
+    if (const auto error = parseFlags(args, known, {}, flags)) return usageError(*error, printConnectUsage);
     if (flags.help) {
         printConnectUsage(std::cout);
         return 0;
     }
+    if (!flags.positional.empty()) return usageError("unexpected argument '" + flags.positional.front() + "'", printConnectUsage);
 
     std::string error;
     SessionConfig config;
-    const auto target = buildTarget(flags, "--check-host", "--check-port", "--check", "--probe-timeout-ms", error);
-    if (!target) return usageError(error, printConnectUsage);
-    config.check = *target;
-
-    const auto poll = parseUnsigned(flags.valueOr("--poll-s", "3"), 1, 600);
-    if (!poll) return usageError("--poll-s must be a whole number of seconds from 1 to 600", printConnectUsage);
-    config.pollIntervalMs = static_cast<int>(*poll) * 1000;
-    const auto timeout = parseUnsigned(flags.valueOr("--timeout-s", "120"), 1, 3600);
-    if (!timeout) return usageError("--timeout-s must be a whole number of seconds from 1 to 3600", printConnectUsage);
-    config.overallTimeoutMs = static_cast<int>(*timeout) * 1000;
-
-    const bool hasMac = flags.has("--mac");
-    const bool hasTo = flags.has("--to");
-    if (hasMac != hasTo) return usageError("--mac and --to go together: give both or neither", printConnectUsage);
-    if (hasMac) {
-        const auto mac = MacAddress::parse(flags.valueOr("--mac", ""));
-        if (!mac) return usageError("'" + flags.valueOr("--mac", "") + "' is not a valid MAC address", printConnectUsage);
-        WakeTarget wake;
-        wake.destination = QString::fromStdString(flags.valueOr("--to", "")).trimmed().toStdString();
-        if (wake.destination.empty()) return usageError("--to needs a host name or address", printConnectUsage);
-        const auto ports = parsePortList(flags.valueOr("--ports", "9,7"));
-        if (!ports) return usageError("'" + flags.valueOr("--ports", "") + "' is not a valid port list (example: 9,7)", printConnectUsage);
-        wake.ports = *ports;
-        const auto repeat = parseUnsigned(flags.valueOr("--repeat", "5"), 1, 100);
-        if (!repeat) return usageError("--repeat must be a whole number from 1 to 100", printConnectUsage);
-        wake.repeat = *repeat;
-        const auto interval = parseUnsigned(flags.valueOr("--interval-ms", "100"), 0, 10000);
-        if (!interval) return usageError("--interval-ms must be a whole number from 0 to 10000", printConnectUsage);
-        wake.interval = std::chrono::milliseconds(*interval);
-        config.wake = WakeConfig{*mac, wake};
-    } else if (flags.has("--ports") || flags.has("--repeat") || flags.has("--interval-ms")) {
-        return usageError("--ports, --repeat and --interval-ms need --mac and --to", printConnectUsage);
+    QString profileName;
+    if (flags.has("--profile")) {
+        if (hasCheckOrWakeFlags(flags)) {
+            return usageError("with --profile only --poll-s and --timeout-s may be given; the rest comes from the profile",
+                              printConnectUsage);
+        }
+        profileName = QString::fromStdString(flags.valueOr("--profile", "")).trimmed();
+        if (profileName.isEmpty()) return usageError("--profile needs a name", printConnectUsage);
+        const ProfileStore store(flags.has("--store") ? QString::fromStdString(flags.valueOr("--store", ""))
+                                                      : ProfileStore::defaultPath());
+        const ProfileStore::LoadResult loaded = store.load();
+        if (!loaded.ok) {
+            std::cerr << "error: " << loaded.error.toStdString() << "\n";
+            return 2;
+        }
+        if (!loaded.warning.isEmpty()) std::cerr << "warning: " << loaded.warning.toStdString() << "\n";
+        const Profile* profile = findProfile(loaded.profiles, profileName);
+        if (!profile) {
+            std::cerr << "error: profile \"" << profileName.toStdString() << "\" not found in " << store.path().toStdString()
+                      << "\n";
+            return 2;
+        }
+        profileName = profile->name;  // as saved, not as typed
+        config = profile->toSessionConfig();
+        if (!applyTimingOverrides(flags, config, error)) return usageError(error, printConnectUsage);
+    } else {
+        if (flags.has("--store")) return usageError("--store only makes sense together with --profile", printConnectUsage);
+        const auto fromFlags = sessionConfigFromFlags(flags, error);
+        if (!fromFlags) return usageError(error, printConnectUsage);
+        config = *fromFlags;
     }
 
     QCoreApplication app(argc, argv);
+    if (!profileName.isEmpty()) std::cout << "Profile: " << profileName.toStdString() << std::endl;
     Session session(config);
     int exitCode = 2;
     QObject::connect(&session, &Session::timelineEvent, &app, [](const TimelineEvent& e) {

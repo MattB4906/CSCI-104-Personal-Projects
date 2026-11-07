@@ -70,10 +70,53 @@ expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 -
 expect 1 "connect with bad check kind" -- connect --check-host 192.0.2.10 --check bogus
 expect 1 "connect with bad timeout" -- connect --check-host 192.0.2.10 --timeout-s 0
 
-contains "version string" "wakedeck-cli 0.2.0-m2" -- --version
+contains "version string" "wakedeck-cli 0.3.0-m3" -- --version
 contains "help lists check" "check" -- --help
 contains "help lists connect" "connect" -- --help
+contains "help lists profile" "profile" -- --help
 contains "connect help names exit codes" "2 timed out" -- connect --help
+
+# Profiles live in a temporary store here; the real one is never touched.
+STOREDIR=$(mktemp -d)
+STORE="$STOREDIR/profiles.json"
+EXAMPLES="$(dirname "$0")/../examples"
+expect 0 "profile --help" -- profile --help
+expect 1 "profile without subcommand" -- profile --store "$STORE"
+expect 1 "profile unknown subcommand" -- profile frobnicate --store "$STORE"
+expect 0 "profile list on a missing store" -- profile list --store "$STORE"
+contains "empty list says so" "No profiles" -- profile list --store "$STORE"
+expect 1 "profile add without name" -- profile add --store "$STORE" --check-host 127.0.0.1
+expect 1 "profile add without check host" -- profile add --store "$STORE" --name "Test PC"
+expect 1 "profile add with custom client but no path" -- profile add --store "$STORE" --name "Test PC" --check-host 127.0.0.1 --client custom
+expect 1 "profile add with stream but no app" -- profile add --store "$STORE" --name "Test PC" --check-host 127.0.0.1 --client moonlight --launch stream
+expect 0 "profile add" -- profile add --store "$STORE" --name "Test PC" --check-host 127.0.0.1 --check-port 1 --check tcp \
+    --mac "$MAC" --to 127.0.0.1 --repeat 2 --interval-ms 0 --client moonlight --launch stream --app Desktop --notes "loopback test"
+expect 2 "profile add twice without --replace" -- profile add --store "$STORE" --name "test pc" --check-host 127.0.0.1
+expect 0 "profile add with --replace" -- profile add --store "$STORE" --name "Test PC" --check-host 127.0.0.1 --check-port 1 --check tcp \
+    --mac "$MAC" --to 127.0.0.1 --repeat 2 --interval-ms 0 --replace
+contains "profile list shows the profile" "Test PC" -- profile list --store "$STORE"
+contains "profile list shows the wake" "4 packets to 127.0.0.1" -- profile list --store "$STORE"
+contains "profile show prints JSON" "\"mac\": \"00:00:5E:00:53:2A\"" -- profile show "Test PC" --store "$STORE"
+expect 2 "profile show unknown name" -- profile show "Nobody" --store "$STORE"
+expect 0 "profile export" -- profile export "Test PC" "$STOREDIR/exported.json" --store "$STORE"
+expect 2 "profile import of an existing name" -- profile import "$STOREDIR/exported.json" --store "$STORE"
+expect 0 "profile import with --replace" -- profile import "$STOREDIR/exported.json" --replace --store "$STORE"
+expect 0 "profile import of the example" -- profile import "$EXAMPLES/example-profile.json" --store "$STORE"
+contains "example appears in the list" "Living Room PC (example)" -- profile list --store "$STORE"
+expect 2 "connect with an unknown profile" -- connect --profile "Nobody" --store "$STORE"
+expect 1 "connect with --profile and a check flag" -- connect --profile "Test PC" --store "$STORE" --check-host 127.0.0.1
+expect 1 "connect with --store but no --profile" -- connect --check-host 127.0.0.1 --store "$STORE"
+expect 2 "connect from the profile times out on loopback" -- connect --profile "Test PC" --store "$STORE" --poll-s 1 --timeout-s 1
+contains "connect from the profile names it" "Profile: Test PC" -- connect --profile "test pc" --store "$STORE" --poll-s 1 --timeout-s 1
+contains "connect from the profile sends the wake" "Wake request sent: 4 packets to 127.0.0.1" -- \
+    connect --profile "Test PC" --store "$STORE" --poll-s 1 --timeout-s 1
+expect 0 "profile remove" -- profile remove "Living Room PC (example)" --store "$STORE"
+expect 2 "profile remove twice" -- profile remove "Living Room PC (example)" --store "$STORE"
+printf 'this is not json' > "$STORE"
+expect 0 "corrupt store is recovered" -- profile list --store "$STORE"
+printf 'this is not json' > "$STORE"
+contains "corrupt store warns" "moved" -- profile list --store "$STORE"
+rm -rf "$STOREDIR"
 contains "dry run plan line" "10 packets: port 9 x5, port 7 x5, 100 ms apart" -- wake --mac "$MAC" --to "$TO" --dry-run
 contains "dry run sends nothing" "nothing was sent" -- wake --mac "$MAC" --to "$TO" --dry-run
 contains "dry run hex dump" "FF FF FF FF FF FF 00 00 5E 00 53 2A 00 00 5E 00" -- wake --mac "$MAC" --to "$TO" --dry-run

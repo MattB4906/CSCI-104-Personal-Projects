@@ -2,7 +2,7 @@
 
 WakeDeck wakes a sleeping computer with a Wake-on-LAN "magic packet", waits until the service you need on it is actually ready, and then opens your client, for example Moonlight for a PC that runs Sunshine. It is written in C++17 with Qt 6 for macOS.
 
-**Status: Milestone 2 of 6, readiness check and Wake & Connect on the command line.** The wake logic, the service checks and the Wake & Connect session exist and are tested; saved profiles, the client launcher and the graphical interface (Qt Widgets) follow in later milestones; see [Current Scope](#current-scope).
+**Status: Milestone 3 of 6, saved profiles.** The wake logic, the service checks, the Wake & Connect session and saved profiles exist and are tested, all usable from the command line. The client launcher and the graphical interface (Qt Widgets) follow in the next milestones; see [Current Scope](#current-scope).
 
 ## Purpose
 
@@ -11,23 +11,24 @@ Waking a PC remotely usually means a script that fires a magic packet and prints
 - **Wake request sent**: the packets left this computer. That is all a sender can ever know.
 - **Service ready**: the program you want to use, such as Sunshine or Remote Desktop, answered.
 
-The finished app will let anyone add their own computers in a graphical interface: how to wake each one, which address and service to check, and which installed client to open. Personal network settings never live in this repository. Today they are passed on the command line; later they are stored in the app's own settings.
+The finished app will let anyone add their own computers in a graphical interface: how to wake each one, which address and service to check, and which installed client to open. Personal network settings never live in this repository: they are saved in a profiles file in your own Library folder, or passed on the command line.
 
 ## Features
 
-### Available now (Milestone 2)
+### Available now (Milestone 3)
 
+- **Profiles.** A saved computer has a name, how to wake it, what to check, how long to wait, which client to open, and notes. Profiles are stored as JSON in `~/Library/Application Support/WakeDeck/profiles.json`, with a schema version so future versions can convert the file. `profile add`, `list`, `show`, `remove`, `import` and `export` manage them; `connect --profile <name>` runs one. A file that cannot be read is moved aside and kept, never deleted, and a file written by a newer WakeDeck is refused and left untouched.
+- **Example profile.** `examples/example-profile.json` is a fictional, complete profile to import and edit. Its values come from ranges reserved for documentation.
 - `wake`: builds the 102-byte magic packet from a MAC address written as `00:00:5E:00:53:2A`, `00-00-5E-00-53-2A` or `00005E00532A` and sends it over UDP to an address or host name, including broadcast addresses, to a list of ports in order, a configurable number of times per port. Defaults: port 9 then port 7, five packets each, 100 ms apart. `--dry-run` shows the plan and the bytes and touches nothing.
 - `check`: asks once whether a service is ready. The Sunshine check fetches `/serverinfo` over HTTP and reads Sunshine's state; the TCP check tries a connection to a port (Remote Desktop, SSH, anything). Every answer is classified: ready, not ready, refused, timed out, unreachable, name not resolved.
 - `connect`: the Wake & Connect run. It checks the service; if the service is not ready and a wake is configured, it sends the wake request, then keeps checking every few seconds until the service answers or the time limit runs out. Each step is a time-stamped line, "Wake request sent" and "ready" are separate events, and a timeout ends with a plain-language **What happened** summary and likely causes.
 - Nothing blocks: checks, name lookups and the pauses between packets all run on the event loop, which is what the graphical app will need.
 - Reports honestly: "sent" means the packets left this computer, and every failed send or check is listed.
-- Tests cover the packet logic, the real socket code over the loopback interface only, the probes against local servers (including a fake Sunshine), the waker, every path of the session with fakes, the explanation text and the command-line behaviour.
+- Tests cover the packet logic, the real socket code over the loopback interface only, the probes against local servers (including a fake Sunshine), the waker, every path of the session with fakes, the explanation text, the profile format with its validation and recovery paths, and the command-line behaviour end to end on loopback.
 
 ### Planned
 
-- Saved profiles: name, wake settings, check, client, in a JSON file in the app's own folder (Milestone 3).
-- Client launch: Moonlight found automatically, or any application you choose (Milestone 4).
+- Client launch: Moonlight found automatically, or any application you choose; the settings are already part of a profile (Milestone 4).
 - A Qt Widgets interface: select a computer, click **Wake & Connect** (Milestone 5).
 - A signed and notarized disk image (Milestone 6).
 
@@ -69,6 +70,23 @@ Result: ready after wake
 Service ready 0:43 after the wake request.
 ```
 
+### Saved profiles
+
+A profile is the whole configuration of one computer. The file is plain JSON, one object per profile inside a `profiles` list, and looks like the example below (shortened). Every field has a default except the name and the check host, and every value is validated when the file is read, so a mistyped MAC address or port is reported by name instead of producing a half-configured computer.
+
+```json
+{
+    "name": "Living Room PC (example)",
+    "wake":  { "mac": "00:00:5E:00:53:2A", "destination": "192.168.1.255", "ports": [9, 7], "repeat": 5, "intervalMs": 100 },
+    "check": { "kind": "sunshine", "host": "living-room-pc.example.net", "port": 47989, "timeoutMs": 2000 },
+    "pollIntervalMs": 3000,
+    "overallTimeoutMs": 120000,
+    "client": { "preset": "moonlight", "launchMode": "stream", "appName": "Desktop" }
+}
+```
+
+Three rules protect the file. It is written atomically, so a crash while saving leaves the previous version intact. A file that is not valid JSON, or has no profiles list, is renamed to `profiles.json.corrupt-<date>` and WakeDeck starts with an empty list, telling you where the old file went. A file whose `schemaVersion` is newer than this WakeDeck understands is refused and not modified. Single unreadable entries are skipped with a warning and a copy of the original file is kept beside it.
+
 ## Class & File Structure
 
 | File | Role |
@@ -83,16 +101,23 @@ Service ready 0:43 after the wake request.
 | `src/engine/QtWaker.h/.cpp` | `Waker` interface and `QtWaker`: resolves the destination asynchronously and sends one packet per timer tick, reusing the core's packet and plan. |
 | `src/engine/Explain.h/.cpp` | `Observations` and `explainTimeout`, the "What happened" text; `formatDuration`; `looksLikeTailscale`. |
 | `src/engine/Session.h/.cpp` | `Session`, the Wake & Connect state machine (Checking, Waking, Waiting, Launching, Done, Failed), its timeline events and outcomes; the `Launcher` interface with `NoLauncher`. |
+| `src/engine/Profile.h/.cpp` | `Profile` and `ClientConfig`, the saved-computer value types; `toJson` and `profileFromJson` with full validation; name helpers. |
+| `src/engine/ProfileStore.h/.cpp` | Reads and writes the profiles file atomically, with the schema version, recovery of unreadable files and single-profile import and export. |
 | `src/cli/main.cpp` | Command dispatch and the synchronous `wake` command. |
-| `src/cli/ConnectCommand.h/.cpp` | The `check` and `connect` commands on Qt's event loop. |
+| `src/cli/Flags.h/.cpp` | The small option parser shared by every command: values, switches, positional words, help anywhere. |
+| `src/cli/SessionFlags.h/.cpp` | Turns flags into `SessionConfig` and `ClientConfig`, so `connect` and `profile add` accept the same options. |
+| `src/cli/ConnectCommand.h/.cpp` | The `check` and `connect` commands on Qt's event loop, including `connect --profile`. |
+| `src/cli/ProfileCommand.h/.cpp` | The `profile` command: list, show, add, remove, import, export. |
+| `examples/example-profile.json` | A complete fictional profile to import and edit. |
 | `tests/check.h`, `tests/test_core.cpp`, `tests/test_loopback.cpp` | Framework-free unit tests of the core and the loopback socket test (Milestone 1). |
 | `tests/test_engine.cpp` | Qt Test suite for the engine: probes against local servers, the waker over loopback, the session with fakes, the explanation text. |
-| `tests/cli_test.sh` | Runs the built tool through its usage errors and `--dry-run` paths and checks exit codes and output. |
+| `tests/test_profiles.cpp` | Qt Test suite for profiles: JSON round trip, defaults, 20 invalid-input cases, the store's save, load and recovery paths, import and export, the shipped example. |
+| `tests/cli_test.sh` | Runs the built tool through usage errors, `--dry-run`, the `profile` command on a temporary store, and `check`/`connect` on loopback ports. |
 | `CMakeLists.txt`, `Makefile` | CMake defines the libraries, the tool and the tests; the Makefile is the entry point and drives CMake. |
 
 ### Object Relationships
 
-The core has no Qt and no event loop; it is plain C++17 that any program could link. The engine depends on the core and on Qt Core and Qt Network. `Session` never names a concrete probe, waker or launcher: it receives factories that create them, so the tests hand it scripted fakes while the tool hands it the real ones. Every asynchronous object emits one `finished` signal and is deleted with `deleteLater`, never from inside the signal handler. The command-line tool depends on the engine only.
+The core has no Qt and no event loop; it is plain C++17 that any program could link. The engine depends on the core and on Qt Core and Qt Network. `Session` never names a concrete probe, waker or launcher: it receives factories that create them, so the tests hand it scripted fakes while the tool hands it the real ones. `Profile` is a value type that converts to the `SessionConfig` the session runs; `ProfileStore` is the only code that reads or writes the profiles file. Every asynchronous object emits one `finished` signal and is deleted with `deleteLater`, never from inside the signal handler. The command-line tool depends on the engine only.
 
 ## How to Compile & Run
 
@@ -120,39 +145,47 @@ wakedeck-cli wake    --mac <address> --to <host> [--ports 9,7] [--repeat 5] [--i
 wakedeck-cli check   --host <host> [--port 47989] [--kind sunshine|tcp] [--timeout-ms 2000]
 wakedeck-cli connect --check-host <host> [--check-port 47989] [--check sunshine|tcp] [--probe-timeout-ms 2000]
                      [--poll-s 3] [--timeout-s 120] [--mac <address> --to <host> [--ports 9,7] [--repeat 5] [--interval-ms 100]]
+wakedeck-cli connect --profile <name> [--poll-s 3] [--timeout-s 120]
+wakedeck-cli profile list | show <name> | remove <name> | import <file.json> [--replace] | export <name> <file.json>
+wakedeck-cli profile add --name <name> --check-host <host> [check and wake options as for connect]
+                         [--client none|moonlight|custom] [--client-path <path>] [--launch open|stream] [--app <name>]
+                         [--notes <text>] [--replace]
 wakedeck-cli <command> --help
 ```
 
-Examples with placeholder values (replace them with your own):
+Every `profile` form and `connect --profile` accept `--store <file>` to use another profiles file; the default is `~/Library/Application Support/WakeDeck/profiles.json`. Profile names are matched without regard to case.
+
+A first session, with placeholder values (replace them with your own):
 
 ```bash
-./build/wakedeck-cli wake --mac 00:00:5E:00:53:2A --to 192.168.1.255
-./build/wakedeck-cli check --host gaming-pc.example.net
-./build/wakedeck-cli connect --check-host gaming-pc.example.net --mac 00:00:5E:00:53:2A --to 192.168.1.255
+./build/wakedeck-cli profile import examples/example-profile.json
+./build/wakedeck-cli profile add --name "Gaming PC" --check-host gaming-pc.example.net \
+    --mac 00:00:5E:00:53:2A --to 192.168.1.255 --client moonlight --launch stream --app Desktop
+./build/wakedeck-cli profile list
+./build/wakedeck-cli connect --profile "Gaming PC"
 ```
 
-Exit codes. `wake`: 0 all packets sent, 1 usage error, 2 destination not resolved, 3 socket error or some packets not sent. `check`: 0 ready, 1 usage error, 2 not ready. `connect`: 0 ready, 1 usage error, 2 timed out, 3 wake request failed, 4 client not launched.
-
-Tip: keep your own values out of this repository. A shell alias or a small script in your home folder can call `wakedeck-cli` with your MAC address, destination and host.
+Exit codes. `wake`: 0 all packets sent, 1 usage error, 2 destination not resolved, 3 socket error or some packets not sent. `check`: 0 ready, 1 usage error, 2 not ready. `connect`: 0 ready, 1 usage error, 2 timed out or profile not found, 3 wake request failed, 4 client not launched. `profile`: 0 done, 1 usage error, 2 not found, already exists, or a file problem.
 
 ## Verification
 
-`make test` runs four tests through ctest:
+`make test` runs five tests through ctest:
 
 - `test_core` (66 checks): MAC parsing, packet layout including the full hex dump decoded back, port-list parsing, plan order, `sendWake` through a recording sink including a simulated failing port, numeric address resolution. No sockets, no name lookups.
 - `test_loopback` (25 checks): a UDP listener on `127.0.0.1` receives three packets from the real `UdpSender` and checks every byte; then descriptor creation is blocked for a moment to check that a sender which cannot open its socket says so.
 - `test_engine` (28 test functions, Qt Test): Sunshine reply parsing, including the lenient case without a `status_code`; the TCP and Sunshine probes against servers on `127.0.0.1`, including a fake Sunshine that answers with real XML, a wrong service, an HTTP error and a silent server that makes the Sunshine check time out; the waker over loopback, byte for byte, plus its refusal of an empty plan; the session with scripted fakes through every outcome (ready at once, wake then ready, timeout with explanation, wake failure, launch failure and success, no wake configured, cancel, and a "keep waiting" extension); the explanation text, durations and the Tailscale heuristic.
-- `tests/cli_test.sh` (46 checks): usage errors, help and `--dry-run` output of all three commands, and, when `python3` is available to open ports, end-to-end runs of `check` and `connect` against closed and open loopback ports, with a wake request addressed to `127.0.0.1`, checking exit codes, the timeline and the "What happened" summary.
+- `test_profiles` (Qt Test): the JSON round trip of a full profile, defaults for a minimal one, 20 invalid inputs each rejected with a reason that names the field, the shipped example, and the store in a temporary folder: save and load with folders created and no temporary files left, a missing file, a corrupt file moved aside, a file without a profiles list, a newer schema refused and left untouched, invalid entries skipped with a copy kept, import and export, and the default path under Application Support.
+- `tests/cli_test.sh` (78 checks): usage errors, help and `--dry-run` output of every command; the `profile` command against a temporary store (add, duplicate names, `--replace`, list, show, export, import of the example, remove, recovery of a corrupt store); and, when `python3` is available to open ports, end-to-end runs of `check`, `connect` and `connect --profile` against closed and open loopback ports, with a wake request addressed to `127.0.0.1`.
 
 Not covered automatically, because they need a silent or absent host: the plain TCP check's own *timed out* path, the *unreachable* and *name not resolved* classifications of the real probes, and a real wake reaching a real PC. The session's handling of those results is covered through the fakes.
 
 ## Current Scope
 
-Milestone 2 of 6. Planned sequence: command-line wake prototype, readiness check and session (this), saved profiles, macOS app lookup and launch, Qt Widgets interface, packaging and release.
+Milestone 3 of 6. Planned sequence: command-line wake prototype, readiness check and session, saved profiles (this), macOS app lookup and launch, Qt Widgets interface, packaging and release.
 
 Not here yet, and worth knowing:
 
-- No saved profiles, no client launch, no graphical interface yet; the tool is how the engine is exercised today.
+- No client launch and no graphical interface yet; the client settings in a profile are stored but not acted on.
 - IPv4 only. SecureOn passwords are not supported.
 - macOS only. The core is plain C++17 and portable, the engine uses only portable Qt modules, but only macOS is built and tested.
 - Binaries built against Homebrew's Qt run on the macOS version they were built on, or newer. The release build in Milestone 6 will use Qt's official binaries so the disk image runs on macOS 13 and later.
@@ -163,6 +196,7 @@ Not here yet, and worth knowing:
 - Resource management with RAII: a socket descriptor owned by one object, released in its destructor, non-copyable.
 - Interfaces separating policy from mechanism: `DatagramSink`, `Probe`, `Waker`, `Launcher`, with factories so tests substitute fakes.
 - Event-driven programming without threads: Qt signals and slots, timers, asynchronous sockets and name lookups; a state machine (`Session`) that advances only when something finishes.
+- A serialization boundary: value types in memory, JSON on disk, validation at the edge with messages that name the field, a schema version for the future, atomic writes and recovery that never deletes the user's data.
 - BSD sockets and HTTP by hand on the test side: `getaddrinfo`, `socket`, `setsockopt(SO_BROADCAST)`, `sendto`, `bind`, `recvfrom`, a fake HTTP server built on `QTcpServer`.
 - Build systems: a Makefile with pattern rules in Milestone 1, then CMake targets, static libraries and Qt's automatic moc, with the Makefile kept as the entry point.
 
