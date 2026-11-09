@@ -17,8 +17,10 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <utility>
 
@@ -85,7 +87,13 @@ void MainWindow::buildUi() {
     connect(addButton, &QPushButton::clicked, this, &MainWindow::addNew);
     connect(editButton_, &QPushButton::clicked, this, &MainWindow::editCurrent);
     connect(deleteButton_, &QPushButton::clicked, this, &MainWindow::deleteCurrent);
-    connect(list_, &QListWidget::currentRowChanged, this, [this](int) { refreshDetails(); });
+    connect(list_, &QListWidget::currentRowChanged, this, [this](int) {
+        // The timeline and the facts belong to one computer; selecting another
+        // one must not leave them, or the Locate button, in place.
+        const Profile* selected = currentProfile();
+        if (!isRunning() && (!selected || !sameProfileName(selected->name, runProfileName_))) resetRunDisplay();
+        refreshDetails();
+    });
     connect(list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) { startWakeAndConnect(); });
 
     // Right: the selected computer and the run.
@@ -234,16 +242,31 @@ void MainWindow::buildMenus() {
 
 void MainWindow::reloadFromStore() {
     const ProfileStore::LoadResult loaded = store_.load();
+    QString warning;
     if (!loaded.ok) {
-        showError(QStringLiteral("Could not read the saved computers"), loaded.error);
+        warning = loaded.error;
         profiles_.clear();
     } else {
         profiles_ = loaded.profiles;
-        if (!loaded.warning.isEmpty()) {
-            showError(QStringLiteral("Some saved computers could not be read"), loaded.warning);
+        warning = loaded.warning;
+    }
+    if (!warning.isEmpty()) {
+        if (isVisible()) {
+            showError(QStringLiteral("About your saved computers"), warning);
+        } else {
+            pendingWarnings_ = warning;  // shown as soon as the window appears, see showEvent
         }
     }
     refreshList();
+}
+
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    if (pendingWarnings_.isEmpty()) return;
+    const QString text = pendingWarnings_;
+    pendingWarnings_.clear();
+    refreshDetails();
+    QTimer::singleShot(0, this, [this, text] { QMessageBox::warning(this, QStringLiteral("About your saved computers"), text); });
 }
 
 void MainWindow::refreshList() {
@@ -264,6 +287,11 @@ void MainWindow::refreshDetails() {
     details_->setVisible(have);
     emptyHint_->setVisible(!have);
     if (!have) {
+        QString hint = QStringLiteral("No computers yet.\n\nClick Add… to describe one: how to wake it, which service to "
+                                      "check, and which client to open. Or choose File ▸ Load Example to see a "
+                                      "complete, fictional profile.");
+        if (!pendingWarnings_.isEmpty()) hint = pendingWarnings_ + QStringLiteral("\n\n") + hint;
+        emptyHint_->setText(hint);
         setRunning(isRunning());
         return;
     }
@@ -283,11 +311,20 @@ const Profile* MainWindow::currentProfile() const {
     return &profiles_[static_cast<std::size_t>(row)];
 }
 
+const Profile* MainWindow::runProfile() const {
+    return findProfile(profiles_, runProfileName_);
+}
+
+int MainWindow::listCount() const {
+    return list_->count();
+}
+
 bool MainWindow::saveProfiles(QString* error) {
     QString why;
     if (!store_.save(profiles_, &why)) {
         if (error) *error = why;
         showError(QStringLiteral("Could not save the computers"), why);
+        reloadFromStore();  // memory and list go back to what the file really holds
         return false;
     }
     return true;
@@ -305,7 +342,8 @@ bool MainWindow::addProfile(Profile profile, QString* error) {
 bool MainWindow::removeCurrentProfile(QString* error) {
     const Profile* profile = currentProfile();
     if (!profile) return false;
-    removeProfile(profiles_, profile->name);
+    const QString name = profile->name;  // a copy: the element itself is about to go
+    removeProfile(profiles_, name);
     if (!saveProfiles(error)) return false;
     refreshList();
     return true;
@@ -339,10 +377,19 @@ void MainWindow::addNew() {
 void MainWindow::editCurrent() {
     const Profile* profile = currentProfile();
     if (!profile || isRunning()) return;
+    const QString oldName = profile->name;
     ProfileEditorDialog dialog(*profile, false, this);
     if (dialog.exec() != QDialog::Accepted) return;
     Profile edited = dialog.result();
-    if (!sameProfileName(edited.name, profile->name)) removeProfile(profiles_, profile->name);
+    if (!sameProfileName(edited.name, oldName)) {
+        if (findProfile(profiles_, edited.name)) {
+            const auto answer = QMessageBox::question(
+                this, QStringLiteral("Replace computer"),
+                QStringLiteral("Another computer is already called \"%1\". Replace it?").arg(edited.name));
+            if (answer != QMessageBox::Yes) return;
+        }
+        removeProfile(profiles_, oldName);
+    }
     addProfile(std::move(edited));
 }
 
@@ -392,11 +439,24 @@ void MainWindow::setRunning(bool running) {
     checkButton_->setEnabled(!running && profile);
     wakeOnlyButton_->setEnabled(!running && profile && profile->wake.has_value());
     openClientButton_->setEnabled(!running && profile && profile->client.preset != ClientConfig::Preset::None);
-    cancelButton_->setVisible(running);
+    cancelButton_->setVisible(session_ != nullptr);  // only a full run can be cancelled
     keepWaitingButton_->setVisible(false);
     editButton_->setEnabled(!running && profile);
     deleteButton_->setEnabled(!running && profile);
     list_->setEnabled(!running);
+}
+
+void MainWindow::beginStep(const Profile& profile) {
+    runProfileName_ = profile.name;
+    resetRunDisplay();
+    stepInFlight_ = true;
+    setRunning(true);
+}
+
+void MainWindow::endStep() {
+    stepInFlight_ = false;
+    setRunning(false);
+    emit stepFinished();
 }
 
 void MainWindow::resetRunDisplay() {
@@ -424,6 +484,7 @@ void MainWindow::appendTimeline(const TimelineEvent& event) {
 void MainWindow::startWakeAndConnect() {
     const Profile* profile = currentProfile();
     if (!profile || isRunning()) return;
+    runProfileName_ = profile->name;
     resetRunDisplay();
     serviceStatus_->setText(QStringLiteral("checking…"));
     session_ = new Session(profile->toSessionConfig(), factoriesFor_(*profile), this);
@@ -473,10 +534,11 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
         break;
     case Outcome::WakeFailed:
         wakeStatus_->setText(QStringLiteral("failed"));
+        serviceStatus_->setText(QStringLiteral("not ready; no further checks because the wake request failed"));
         showExplanation(summary, false);
         break;
     case Outcome::LaunchFailed: {
-        const Profile* profile = currentProfile();
+        const Profile* profile = runProfile();
         showExplanation(QStringLiteral("The service is ready, but the client could not be opened.\n%1").arg(summary),
                         profile && profile->client.preset != ClientConfig::Preset::None);
         break;
@@ -498,7 +560,7 @@ void MainWindow::showExplanation(const QString& text, bool offerLocate) {
 void MainWindow::startCheckOnly() {
     const Profile* profile = currentProfile();
     if (!profile || isRunning()) return;
-    resetRunDisplay();
+    beginStep(*profile);
     serviceStatus_->setText(QStringLiteral("checking…"));
     TimelineEvent begin;
     begin.at = QDateTime::currentDateTime();
@@ -515,6 +577,7 @@ void MainWindow::startCheckOnly() {
         appendTimeline(event);
         serviceStatus_->setText(result.ready() ? QStringLiteral("ready at %1 (%2)").arg(stamp(event.at), result.detail)
                                                : QStringLiteral("not ready: %1 (%2)").arg(statusName(result.status), result.detail));
+        endStep();
         emit checkFinished(result.ready());
     });
     probe->start();
@@ -523,7 +586,7 @@ void MainWindow::startCheckOnly() {
 void MainWindow::startWakeOnly() {
     const Profile* profile = currentProfile();
     if (!profile || isRunning() || !profile->wake) return;
-    resetRunDisplay();
+    beginStep(*profile);
     wakeStatus_->setText(QStringLiteral("sending…"));
     Waker* waker = factoriesFor_(*profile).waker(*profile->wake, this);
     connect(waker, &Waker::finished, this, [this, waker](bool allSent, const QString& summary) {
@@ -538,6 +601,7 @@ void MainWindow::startWakeOnly() {
         note.at = event.at;
         note.text = QStringLiteral("This confirms the packets left this Mac, not that the computer is awake. Use Check now or Wake & Connect to find out.");
         appendTimeline(note);
+        endStep();
     });
     waker->start();
 }
@@ -545,7 +609,7 @@ void MainWindow::startWakeOnly() {
 void MainWindow::startOpenClient() {
     const Profile* profile = currentProfile();
     if (!profile || isRunning() || profile->client.preset == ClientConfig::Preset::None) return;
-    resetRunDisplay();
+    beginStep(*profile);
     Launcher* launcher = factoriesFor_(*profile).launcher(this);
     TimelineEvent begin;
     begin.at = QDateTime::currentDateTime();
@@ -558,8 +622,9 @@ void MainWindow::startOpenClient() {
         event.kind = ok ? EventKind::Info : EventKind::Failure;
         event.text = summary;
         appendTimeline(event);
+        endStep();
         if (!ok) {
-            const Profile* profile = currentProfile();
+            const Profile* profile = runProfile();
             showExplanation(summary, profile && profile->client.preset != ClientConfig::Preset::None);
         }
     });
@@ -581,8 +646,8 @@ void MainWindow::cancelRun() {
 }
 
 void MainWindow::locateClient() {
-    const Profile* profile = currentProfile();
-    if (!profile) return;
+    const Profile* profile = runProfile();  // the computer whose launch failed, never another one
+    if (!profile || isRunning()) return;
     const QString start = profile->client.path.isEmpty() ? QStringLiteral("/Applications") : profile->client.path;
     const QString chosen = QFileDialog::getOpenFileName(this, QStringLiteral("Locate the client application"), start,
                                                         QStringLiteral("Applications (*.app);;All files (*)"));

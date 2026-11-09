@@ -30,21 +30,28 @@ namespace {
 
 class FakeProbe final : public Probe {
 public:
-    FakeProbe(ProbeResult result, QObject* parent) : Probe(parent), result_(std::move(result)) {}
+    FakeProbe(ProbeResult result, int delayMs, QObject* parent) : Probe(parent), result_(std::move(result)), delayMs_(delayMs) {}
     void start() override {
-        QTimer::singleShot(0, this, [this] { emit finished(result_); });
+        QTimer::singleShot(delayMs_, this, [this] { emit finished(result_); });
     }
 
 private:
     ProbeResult result_;
+    int delayMs_;
 };
 
 class FakeWaker final : public Waker {
 public:
-    explicit FakeWaker(QObject* parent) : Waker(parent) {}
+    FakeWaker(bool ok, QObject* parent) : Waker(parent), ok_(ok) {}
     void start() override {
-        QTimer::singleShot(0, this, [this] { emit finished(true, QStringLiteral("10 packets to 192.0.2.255 (ports 9 x5, 7 x5)")); });
+        QTimer::singleShot(0, this, [this] {
+            emit finished(ok_, ok_ ? QStringLiteral("10 packets to 192.0.2.255 (ports 9 x5, 7 x5)")
+                                   : QStringLiteral("0 of 10 packets to 192.0.2.255; cannot open a UDP socket"));
+        });
     }
+
+private:
+    bool ok_;
 };
 
 class FakeLauncher final : public Launcher {
@@ -64,6 +71,8 @@ private:
 struct Script {
     std::vector<ProbeStatus> statuses{ProbeStatus::Ready};
     bool launchOk = true;
+    bool wakeOk = true;
+    int probeDelayMs = 0;
     int probesCreated = 0;
     int wakersCreated = 0;
 };
@@ -77,11 +86,11 @@ MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
             ProbeResult result;
             result.status = script->statuses[index];
             result.detail = statusName(result.status);
-            return new FakeProbe(result, parent);
+            return new FakeProbe(result, script->probeDelayMs, parent);
         };
         factories.waker = [script](const WakeConfig&, QObject* parent) -> Waker* {
             ++script->wakersCreated;
-            return new FakeWaker(parent);
+            return new FakeWaker(script->wakeOk, parent);
         };
         if (profile.client.preset == ClientConfig::Preset::None) {
             factories.launcher = [](QObject* parent) -> Launcher* { return new NoLauncher(parent); };
@@ -300,6 +309,104 @@ private slots:
         QCOMPARE(script->probesCreated, 0);
         QVERIFY(window.timelineTexts().join(QLatin1Char('\n')).contains(QStringLiteral("not that the computer is awake")));
         QCOMPARE(window.serviceStatusText(), QStringLiteral("not checked"));
+    }
+
+    void switchingComputerClearsAFinishedRun() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("A"), false, true), sampleProfile(QStringLiteral("B"), false, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->launchOk = false;
+        MainWindow window(store, fakeFactories(script));
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();  // on A
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::LaunchFailed);
+        QVERIFY(window.locateOffered());
+
+        window.selectProfile(QStringLiteral("B"));
+        QCOMPARE(window.currentProfile()->name, QStringLiteral("B"));
+        QVERIFY(!window.explanationVisible());  // A's failure must not be acted on from B
+        QVERIFY(!window.locateOffered());
+        QVERIFY(window.timelineTexts().isEmpty());
+        QCOMPARE(window.serviceStatusText(), QStringLiteral("not checked"));
+        QCOMPARE(window.wakeStatusText(), QStringLiteral("not sent"));
+    }
+
+    void aSingleStepBlocksOtherActions() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Refused};
+        script->probeDelayMs = 150;
+        MainWindow window(store, fakeFactories(script));
+        std::optional<bool> ready;
+        QObject::connect(&window, &MainWindow::checkFinished, [&ready](bool r) { ready = r; });
+
+        window.startCheckOnly();
+        QVERIFY(window.isRunning());
+        QVERIFY(!window.findChild<QPushButton*>(QStringLiteral("wakeConnectButton"))->isEnabled());
+        window.startWakeAndConnect();  // must be ignored while the check is in flight
+        window.startWakeOnly();
+        window.startOpenClient();
+        QCOMPARE(script->probesCreated, 1);
+        QCOMPARE(script->wakersCreated, 0);
+
+        QVERIFY(QTest::qWaitFor([&ready] { return ready.has_value(); }, 5000));
+        QVERIFY(!window.isRunning());
+        QVERIFY(window.findChild<QPushButton*>(QStringLiteral("wakeConnectButton"))->isEnabled());
+        QVERIFY2(window.serviceStatusText().contains(QStringLiteral("refused")), qPrintable(window.serviceStatusText()));
+    }
+
+    void wakeFailureUpdatesBothFacts() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, false)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->wakeOk = false;
+        MainWindow window(store, fakeFactories(script));
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::WakeFailed);
+        QCOMPARE(window.wakeStatusText(), QStringLiteral("failed"));
+        QVERIFY2(!window.serviceStatusText().contains(QStringLiteral("still checking")), qPrintable(window.serviceStatusText()));
+        QVERIFY2(window.serviceStatusText().contains(QStringLiteral("wake request failed")), qPrintable(window.serviceStatusText()));
+        QVERIFY(window.explanationVisible());
+    }
+
+    void startupWarningIsKeptForTheUser() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("this is not json");
+        file.close();
+        MainWindow window(ProfileStore(path), fakeFactories(std::make_shared<Script>()));
+        QVERIFY(window.profiles().empty());
+        QVERIFY2(window.pendingWarningText().contains(QStringLiteral("moved")), qPrintable(window.pendingWarningText()));
+    }
+
+    void failedSaveKeepsListAndMemoryInStep() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("A"), false, false), sampleProfile(QStringLiteral("B"), false, false)}, nullptr));
+        MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+        QCOMPARE(window.profiles().size(), std::size_t(2));
+
+        // Make the folder read-only so the next save must fail.
+        const QFile::Permissions original = QFile(dir.path()).permissions();
+        QVERIFY(QFile::setPermissions(dir.path(), QFile::ReadOwner | QFile::ExeOwner));
+        QString error;
+        const bool removed = window.removeCurrentProfile(&error);
+        QFile::setPermissions(dir.path(), original);  // restore before any assertion can bail out
+        QVERIFY(!removed);
+        QVERIFY(!error.isEmpty());
+        QCOMPARE(window.profiles().size(), std::size_t(2));
+        QCOMPARE(window.listCount(), 2);
+        QVERIFY(window.currentProfile() != nullptr);
     }
 
     // ---- Editor ----

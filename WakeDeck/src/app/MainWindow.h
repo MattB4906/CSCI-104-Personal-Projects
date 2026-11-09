@@ -36,7 +36,10 @@ public:
     // State, for tests and scripting.
     const std::vector<Profile>& profiles() const { return profiles_; }
     const Profile* currentProfile() const;
-    bool isRunning() const { return session_ != nullptr; }
+    // True while a Wake & Connect run or a single step (check, wake, open) is in flight.
+    bool isRunning() const { return session_ != nullptr || stepInFlight_; }
+    int listCount() const;
+    QString pendingWarningText() const { return pendingWarnings_; }
     QStringList timelineTexts() const;
     QString wakeStatusText() const;
     QString serviceStatusText() const;
@@ -59,6 +62,10 @@ public:
 signals:
     void runFinished(wakedeck::Outcome outcome);
     void checkFinished(bool ready);
+    void stepFinished();
+
+protected:
+    void showEvent(QShowEvent* event) override;
 
 private:
     void buildUi();
@@ -67,7 +74,10 @@ private:
     void refreshList();
     void refreshDetails();
     void setRunning(bool running);
+    void beginStep(const Profile& profile);
+    void endStep();
     void resetRunDisplay();
+    const Profile* runProfile() const;  // the profile the displayed run belongs to
     void appendTimeline(const TimelineEvent& event);
     void onSessionEvent(const TimelineEvent& event);
     void onSessionState(SessionState state);
@@ -88,6 +98,9 @@ private:
     FactoriesFor factoriesFor_;
     std::vector<Profile> profiles_;
     Session* session_ = nullptr;  // child of this window while a run is active
+    bool stepInFlight_ = false;   // a single check, wake or open is in progress
+    QString runProfileName_;      // which computer the displayed run belongs to
+    QString pendingWarnings_;     // load warnings to show once the window is visible
 
     QListWidget* list_ = nullptr;
     QWidget* details_ = nullptr;
