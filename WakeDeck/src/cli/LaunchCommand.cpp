@@ -21,7 +21,9 @@ void printLaunchUsage(std::ostream& out) {
            "\n"
            "Opens the client exactly as Wake & Connect does once the service is ready, without checking\n"
            "or waking anything. --dry-run only shows what would be started and where the client was\n"
-           "looked for. In --client-args, {host} is replaced by the host.\n"
+           "looked for. --client-args is split on spaces and {host} is replaced by the host; an argument\n"
+           "that itself contains a space can only be written in a profile file. Client paths must be\n"
+           "absolute.\n"
            "\n"
            "Exit codes: 0 launched (or would be), 1 usage error, 2 client not found or not started.\n";
 }

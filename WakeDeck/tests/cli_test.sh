@@ -90,7 +90,8 @@ expect 0 "launch a custom client" -- launch --host 127.0.0.1 --client custom --c
 contains "launch reports success" "Launched custom client true" -- launch --host 127.0.0.1 --client custom --client-path /usr/bin/true
 expect 2 "launch a missing custom client" -- launch --host 127.0.0.1 --client custom --client-path /nonexistent/wakedeck-client
 contains "missing client is named" "not found" -- launch --host 127.0.0.1 --client custom --client-path /nonexistent/wakedeck-client
-expect 1 "connect with --profile and a client flag" -- connect --profile "X" --client moonlight
+expect 1 "launch rejects a relative client path" -- launch --host 127.0.0.1 --client custom --client-path ok.sh --dry-run
+contains "relative path error says absolute" "absolute" -- launch --host 127.0.0.1 --client custom --client-path ok.sh --dry-run
 contains "connect help names exit codes" "2 timed out" -- connect --help
 
 # Profiles live in a temporary store here; the real one is never touched.
@@ -134,6 +135,13 @@ contains "connect from the profile sends the wake" "Wake request sent: 4 packets
     connect --profile "Test PC" --store "$STORE" --poll-s 1 --timeout-s 1
 expect 1 "launch with profile and client flag" -- launch --profile "Test PC" --store "$STORE" --client custom --client-path /usr/bin/true
 expect 2 "launch with an unknown profile" -- launch --profile "Nobody" --store "$STORE" --dry-run
+expect 1 "connect with --profile and a client flag" -- connect --profile "Test PC" --store "$STORE" --client moonlight
+expect 0 "profile add with a custom client" -- profile add --store "$STORE" --name "Echo PC" --check-host 127.0.0.1 \
+    --client custom --client-path /bin/echo --client-args "hi {host}"
+expect 0 "launch --profile dry run" -- launch --profile "Echo PC" --store "$STORE" --dry-run
+contains "launch --profile dry run shows the command" "Would run:  /bin/echo hi 127.0.0.1" -- launch --profile "Echo PC" --store "$STORE" --dry-run
+expect 0 "launch --profile runs the client" -- launch --profile "Echo PC" --store "$STORE"
+contains "launch --profile reports success" "Launched custom client echo hi 127.0.0.1" -- launch --profile "Echo PC" --store "$STORE"
 expect 0 "profile remove" -- profile remove "Living Room PC (example)" --store "$STORE"
 expect 2 "profile remove twice" -- profile remove "Living Room PC (example)" --store "$STORE"
 printf 'this is not json' > "$STORE"

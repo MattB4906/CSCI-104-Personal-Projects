@@ -202,7 +202,56 @@ private slots:
         QCOMPARE(run.plan->arguments, QStringList{QStringLiteral("h")});
     }
 
+    void relativePathsAreRejectedAndAbsolutised() {
+        // The rules reject them, so neither a profile nor the command line can save one.
+        QVERIFY(clientConfigError(customClient(QStringLiteral("ok.sh"))).contains(QStringLiteral("absolute")));
+        QVERIFY(clientConfigError(customClient(QStringLiteral("./tools/ok.sh"))).contains(QStringLiteral("absolute")));
+        ClientConfig moonlight;
+        moonlight.preset = ClientConfig::Preset::Moonlight;
+        moonlight.path = QStringLiteral("Moonlight.app");
+        QVERIFY(clientConfigError(moonlight).contains(QStringLiteral("absolute")));
+        QVERIFY(clientConfigError(customClient(QStringLiteral("/usr/bin/true"))).isEmpty());
+
+        // And the resolver never hands a relative program to the process start,
+        // which runs from the home folder.
+        QTemporaryDir dir;
+        QFile script(dir.filePath(QStringLiteral("ok.sh")));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/bin/sh\nexit 0\n");
+        script.close();
+        script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        const QString previous = QDir::currentPath();
+        QVERIFY(QDir::setCurrent(dir.path()));
+        const LaunchResolution r = resolveLaunch(customClient(QStringLiteral("./ok.sh")), QStringLiteral("h"));
+        QVERIFY(QDir::setCurrent(previous));
+        QVERIFY2(r.plan.has_value(), qPrintable(r.error));
+        QVERIFY2(QDir::isAbsolutePath(r.plan->program), qPrintable(r.plan->program));
+        QCOMPARE(QFileInfo(r.plan->program).canonicalFilePath(), QFileInfo(dir.filePath(QStringLiteral("ok.sh"))).canonicalFilePath());
+    }
+
     // ---- Launching, harmless programs only ----
+
+    void opensFakeBundleThroughTheSystem() {
+        // A bundle without arguments goes through NSWorkspace; the fake bundle's
+        // executable is a script, so nothing appears on screen.
+        QTemporaryDir dir;
+        const QString app = makeFakeBundle(QDir(dir.path()));
+        const LaunchOutcome outcome = runLauncher(customClient(app), QStringLiteral("h"), 15000);
+        QVERIFY2(outcome.ok.has_value(), "the open completion never arrived on the Qt thread");
+        QVERIFY2(*outcome.ok, qPrintable(outcome.summary));
+        QVERIFY2(outcome.summary.contains(QStringLiteral("Opened custom client Fake.app")), qPrintable(outcome.summary));
+    }
+
+    void completionIsSkippedWhenTheContextIsGone() {
+        QTemporaryDir dir;
+        const QString app = makeFakeBundle(QDir(dir.path()));
+        bool called = false;
+        auto* context = new QObject;
+        platform::openApplication(app, context, [&called](bool, const QString&) { called = true; });
+        delete context;  // gone before the system answers
+        QTest::qWait(1500);
+        QVERIFY(!called);
+    }
 
     void launchesCustomExecutable() {
         const LaunchOutcome outcome = runLauncher(customClient(QStringLiteral("/usr/bin/true"), {QStringLiteral("{host}")}),

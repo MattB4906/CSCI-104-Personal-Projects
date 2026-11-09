@@ -149,6 +149,7 @@ private slots:
         QTest::newRow("none with stream") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"launchMode": "stream", "appName": "Desktop"}})") << QStringLiteral("moonlight");
         QTest::newRow("custom with stream") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "custom", "path": "/x", "launchMode": "stream", "appName": "D"}})") << QStringLiteral("moonlight");
         QTest::newRow("moonlight with arguments") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "arguments": ["a"]}})") << QStringLiteral("custom");
+        QTest::newRow("relative client path") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "custom", "path": "bin/tool"}})") << QStringLiteral("absolute");
         // Mistyped field names are reported instead of silently replaced by defaults.
         QTest::newRow("unknown top-level field") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "pollIntervalMS": 1})") << QStringLiteral("pollIntervalMS");
         QTest::newRow("unknown check field") << QByteArray(R"({"name": "X", "check": {"host": "h", "timeoutMS": 9}})") << QStringLiteral("timeoutMS");

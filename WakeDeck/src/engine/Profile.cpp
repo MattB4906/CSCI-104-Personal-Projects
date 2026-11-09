@@ -1,5 +1,6 @@
 #include "Profile.h"
 
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonValue>
 #include <algorithm>
@@ -208,6 +209,11 @@ std::optional<ClientConfig> clientFromJson(const QJsonValue& value, QString* err
 
 QString clientConfigError(const ClientConfig& client) {
     const bool stream = client.launchMode == QLatin1String("stream");
+    // A relative path would mean a different program depending on where WakeDeck
+    // is started from, and a saved profile has no working directory at all.
+    if (!client.path.isEmpty() && !QDir::isAbsolutePath(client.path)) {
+        return QStringLiteral("the client path must be absolute (start with /), not \"%1\"").arg(client.path);
+    }
     switch (client.preset) {
     case ClientConfig::Preset::None:
         if (!client.path.isEmpty()) return QStringLiteral("a client path needs a client (moonlight or custom)");

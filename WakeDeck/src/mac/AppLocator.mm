@@ -5,6 +5,7 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 
+#include <QCoreApplication>
 #include <QMetaObject>
 #include <QPointer>
 
@@ -33,8 +34,10 @@ void openApplication(const QString& appPath, QObject* context,
         NSWorkspaceOpenConfiguration* configuration = [NSWorkspaceOpenConfiguration configuration];
         configuration.activates = YES;
 
-        // The completion handler runs on a system thread; hop back to the caller's
-        // thread through Qt's event loop, and only if the caller still exists.
+        // The completion handler runs on a system thread. Hop back to the Qt
+        // thread through the application object, which outlives any caller, and
+        // only there test whether the caller still exists: testing the QPointer on
+        // the system thread would race with the caller's destructor.
         QPointer<QObject> guard(context);
         [[NSWorkspace sharedWorkspace] openApplicationAtURL:url
                                               configuration:configuration
@@ -42,10 +45,14 @@ void openApplication(const QString& appPath, QObject* context,
                                               const bool ok = application != nil && error == nil;
                                               const QString message =
                                                   error != nil ? QString::fromNSString(error.localizedDescription) : QString();
-                                              if (guard) {
-                                                  QMetaObject::invokeMethod(
-                                                      guard, [done, ok, message] { done(ok, message); }, Qt::QueuedConnection);
-                                              }
+                                              QObject* receiver = QCoreApplication::instance();
+                                              if (receiver == nullptr) return;  // the application is shutting down
+                                              QMetaObject::invokeMethod(
+                                                  receiver,
+                                                  [guard, done, ok, message] {
+                                                      if (guard) done(ok, message);
+                                                  },
+                                                  Qt::QueuedConnection);
                                           }];
     }
 }

@@ -46,7 +46,8 @@ void printConnectUsage(std::ostream& out) {
            "then keeps checking until the service answers or --timeout-s runs out, and finally opens\n"
            "the client. Without a wake it only waits; without a client it stops at \"ready\". With\n"
            "--profile the settings come from a saved profile (see `profile --help`); only --poll-s and\n"
-           "--timeout-s may be given alongside it.\n"
+           "--timeout-s may be given alongside it. --client-args is split on spaces; client paths must\n"
+           "be absolute.\n"
            "\n"
            "Exit codes: 0 ready and client launched, 1 usage error, 2 timed out or profile not found,\n"
            "            3 wake request failed, 4 client not found or not launched.\n";

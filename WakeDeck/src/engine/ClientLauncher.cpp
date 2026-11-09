@@ -20,8 +20,11 @@ bool isBundle(const QString& path) {
 // usual folders. Records every place tried.
 std::optional<QString> findMoonlight(const QString& configuredPath, QStringList& searched) {
     if (!configuredPath.isEmpty()) {
-        searched << configuredPath;
-        if (QFileInfo::exists(configuredPath)) return configuredPath;
+        // Absolute, so the result does not depend on the working directory the
+        // client is later started from.
+        const QString absolute = QFileInfo(configuredPath).absoluteFilePath();
+        searched << absolute;
+        if (QFileInfo::exists(absolute)) return absolute;
     }
     searched << QStringLiteral("Launch Services, bundle id %1").arg(QLatin1String(kMoonlightBundleId));
     if (const auto registered = platform::applicationPathForBundleId(QLatin1String(kMoonlightBundleId))) {
@@ -103,20 +106,21 @@ LaunchResolution resolveLaunch(const ClientConfig& client, const QString& host) 
     }
 
     case ClientConfig::Preset::Custom: {
-        resolution.searched << client.path;
-        const QFileInfo info(client.path);
+        const QString path = QFileInfo(client.path).absoluteFilePath();  // see findMoonlight
+        resolution.searched << path;
+        const QFileInfo info(path);
         if (!info.exists()) {
-            resolution.error = QStringLiteral("the client %1 was not found").arg(client.path);
+            resolution.error = QStringLiteral("the client %1 was not found").arg(path);
             return resolution;
         }
         const QStringList arguments = substituteHost(client.arguments, host);
         std::optional<LaunchPlan> plan;
-        if (isBundle(client.path)) {
-            plan = planForBundle(client.path, arguments, error);
+        if (isBundle(path)) {
+            plan = planForBundle(path, arguments, error);
         } else if (info.isFile() && info.isExecutable()) {
-            plan = LaunchPlan{client.path, arguments, false, QString()};
+            plan = LaunchPlan{path, arguments, false, QString()};
         } else {
-            error = QStringLiteral("%1 is not executable").arg(client.path);
+            error = QStringLiteral("%1 is not executable").arg(path);
         }
         if (!plan) {
             resolution.error = error;
@@ -160,7 +164,7 @@ void ClientLauncher::start() {
     const bool started = QProcess::startDetached(plan.program, plan.arguments, QDir::homePath(), &pid);
     const QString summary = started
         ? QStringLiteral("Launched %1 (process %2)").arg(plan.description).arg(pid)
-        : QStringLiteral("could not start %1 %2").arg(plan.program, plan.arguments.join(QLatin1Char(' ')));
+        : QStringLiteral("could not start %1").arg((QStringList{plan.program} + plan.arguments).join(QLatin1Char(' ')));
     QTimer::singleShot(0, this, [this, started, summary] { finish(started, summary); });
 }
 
