@@ -15,13 +15,20 @@ const std::set<std::string>& sessionValueFlags() {
 }
 
 const std::set<std::string>& clientValueFlags() {
-    static const std::set<std::string> flags = {"--client", "--client-path", "--launch", "--app"};
+    static const std::set<std::string> flags = {"--client", "--client-path", "--launch", "--app", "--client-args"};
     return flags;
 }
 
 bool hasCheckOrWakeFlags(const Flags& flags) {
     for (const std::string& flag : sessionValueFlags()) {
         if (flag == "--poll-s" || flag == "--timeout-s") continue;
+        if (flags.has(flag.c_str())) return true;
+    }
+    return false;
+}
+
+bool hasClientFlags(const Flags& flags) {
+    for (const std::string& flag : clientValueFlags()) {
         if (flags.has(flag.c_str())) return true;
     }
     return false;
@@ -153,6 +160,10 @@ std::optional<ClientConfig> clientConfigFromFlags(const Flags& flags, std::strin
     }
     client.launchMode = QString::fromStdString(launch);
     client.appName = QString::fromStdString(flags.valueOr("--app", "")).trimmed();
+    if (flags.has("--client-args")) {
+        // One string, split on spaces; "{host}" inside it is replaced at launch time.
+        client.arguments = QString::fromStdString(flags.valueOr("--client-args", "")).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    }
     // The same rules as for a profile file, so nothing half-configured gets saved either way.
     const QString inconsistency = clientConfigError(client);
     if (!inconsistency.isEmpty()) {

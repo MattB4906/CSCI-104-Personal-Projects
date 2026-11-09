@@ -1,11 +1,17 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 0.3.0 LANGUAGES CXX)
-set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}-m3")  # the one place the version is written
+project(WakeDeck VERSION 0.4.0 LANGUAGES CXX)
+set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}-m4")  # the one place the version is written
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(NOT APPLE)
+  message(FATAL_ERROR "WakeDeck builds on macOS only for now: the client launcher uses Launch Services and NSWorkspace.")
+endif()
+enable_language(OBJCXX)
+set(CMAKE_OBJCXX_STANDARD 17)
+set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -44,8 +50,13 @@ add_library(wakedeck_engine STATIC
   src/engine/Profile.h
   src/engine/Profile.cpp
   src/engine/ProfileStore.h
-  src/engine/ProfileStore.cpp)
-target_link_libraries(wakedeck_engine PUBLIC wakedeck_core Qt6::Core Qt6::Network)
+  src/engine/ProfileStore.cpp
+  src/engine/AppLocator.h
+  src/engine/ClientLauncher.h
+  src/engine/ClientLauncher.cpp
+  src/mac/AppLocator.mm)
+set_source_files_properties(src/mac/AppLocator.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_link_libraries(wakedeck_engine PUBLIC wakedeck_core Qt6::Core Qt6::Network "-framework AppKit")
 
 add_executable(wakedeck-cli
   src/cli/main.cpp
@@ -56,7 +67,9 @@ add_executable(wakedeck-cli
   src/cli/ConnectCommand.h
   src/cli/ConnectCommand.cpp
   src/cli/ProfileCommand.h
-  src/cli/ProfileCommand.cpp)
+  src/cli/ProfileCommand.cpp
+  src/cli/LaunchCommand.h
+  src/cli/LaunchCommand.cpp)
 target_link_libraries(wakedeck-cli PRIVATE wakedeck_engine)
 target_compile_definitions(wakedeck-cli PRIVATE WAKEDECK_VERSION="${WAKEDECK_VERSION_STRING}")
 
@@ -78,6 +91,10 @@ add_executable(test_profiles tests/test_profiles.cpp)
 target_link_libraries(test_profiles PRIVATE wakedeck_engine Qt6::Test)
 target_compile_definitions(test_profiles PRIVATE WAKEDECK_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME test_profiles COMMAND test_profiles)
+
+add_executable(test_launcher tests/test_launcher.cpp)
+target_link_libraries(test_launcher PRIVATE wakedeck_engine Qt6::Test)
+add_test(NAME test_launcher COMMAND test_launcher)
 
 add_test(NAME cli_test
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_test.sh $<TARGET_FILE:wakedeck-cli>)

@@ -39,13 +39,15 @@ struct TimelineEvent {
     QString text;
 };
 
-// Opens the client once the service is ready. Milestone 2 only has NoLauncher;
-// the macOS launcher arrives in Milestone 4.
+// Opens the client once the service is ready. ClientLauncher (ClientLauncher.h)
+// is the real one; NoLauncher stands in when no client is configured.
 class Launcher : public QObject {
     Q_OBJECT
 public:
     explicit Launcher(QObject* parent = nullptr) : QObject(parent) {}
     virtual void start() = 0;
+    virtual bool configured() const { return true; }      // false: nothing will be launched
+    virtual QString describe() const { return QStringLiteral("the client"); }
 
 signals:
     void finished(bool ok, const QString& summary);
@@ -55,6 +57,8 @@ class NoLauncher final : public Launcher {
     Q_OBJECT
 public:
     explicit NoLauncher(QObject* parent = nullptr) : Launcher(parent) {}
+    bool configured() const override { return false; }
+    QString describe() const override { return QStringLiteral("no client"); }
     void start() override;
 };
 

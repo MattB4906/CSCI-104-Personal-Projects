@@ -163,6 +163,9 @@ ProbeResult SunshineProbe::interpretServerInfo(const QByteArray& body) {
     const QLatin1String prefix("SUNSHINE_SERVER_");
     if (shortState.startsWith(prefix)) shortState.remove(0, prefix.size());
     shortState = shortState.toLower();
+    if (shortState == QLatin1String("busy")) {
+        shortState += QStringLiteral(" (a stream is already active; Moonlight resumes it)");
+    }
 
     result.status = ProbeStatus::Ready;
     result.detail = hostname.isEmpty() ? QStringLiteral("state %1").arg(shortState)

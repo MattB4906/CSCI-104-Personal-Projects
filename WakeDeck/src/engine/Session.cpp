@@ -33,7 +33,7 @@ QString outcomeName(Outcome outcome) {
 
 void NoLauncher::start() {
     QTimer::singleShot(0, this, [this] {
-        emit finished(true, QStringLiteral("No client configured in this milestone; nothing launched."));
+        emit finished(true, QStringLiteral("No client configured for this computer; nothing launched."));
     });
 }
 
@@ -171,6 +171,9 @@ void Session::launch() {
     setState(SessionState::Launching);
     launcher_ = factories_.launcher(this);
     connect(launcher_, &Launcher::finished, this, &Session::onLaunchFinished);
+    if (launcher_->configured()) {
+        emitEvent(EventKind::Info, QStringLiteral("Launching %1").arg(launcher_->describe()));
+    }
     launcher_->start();
 }
 

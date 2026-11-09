@@ -70,10 +70,27 @@ expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 -
 expect 1 "connect with bad check kind" -- connect --check-host 192.0.2.10 --check bogus
 expect 1 "connect with bad timeout" -- connect --check-host 192.0.2.10 --timeout-s 0
 
-contains "version string" "wakedeck-cli 0.3.0-m3" -- --version
+contains "version string" "wakedeck-cli 0.4.0-m4" -- --version
 contains "help lists check" "check" -- --help
 contains "help lists connect" "connect" -- --help
 contains "help lists profile" "profile" -- --help
+contains "help lists launch" "launch" -- --help
+
+# The launch command, with harmless clients only: /usr/bin/true and /bin/echo.
+expect 0 "launch --help" -- launch --help
+expect 1 "launch without host or profile" -- launch
+expect 1 "launch without client" -- launch --host 127.0.0.1
+expect 1 "launch custom without path" -- launch --host 127.0.0.1 --client custom
+expect 1 "launch with --store but no --profile" -- launch --host 127.0.0.1 --client custom --client-path /usr/bin/true --store /tmp/x.json
+expect 0 "launch dry run of a custom client" -- launch --host 127.0.0.1 --client custom --client-path /usr/bin/true --dry-run
+contains "dry run shows the program" "Would run:  /usr/bin/true" -- launch --host 127.0.0.1 --client custom --client-path /usr/bin/true --dry-run
+contains "dry run substitutes the host" "/bin/echo hello 127.0.0.1" -- \
+    launch --host 127.0.0.1 --client custom --client-path /bin/echo --client-args "hello {host}" --dry-run
+expect 0 "launch a custom client" -- launch --host 127.0.0.1 --client custom --client-path /usr/bin/true
+contains "launch reports success" "Launched custom client true" -- launch --host 127.0.0.1 --client custom --client-path /usr/bin/true
+expect 2 "launch a missing custom client" -- launch --host 127.0.0.1 --client custom --client-path /nonexistent/wakedeck-client
+contains "missing client is named" "not found" -- launch --host 127.0.0.1 --client custom --client-path /nonexistent/wakedeck-client
+expect 1 "connect with --profile and a client flag" -- connect --profile "X" --client moonlight
 contains "connect help names exit codes" "2 timed out" -- connect --help
 
 # Profiles live in a temporary store here; the real one is never touched.
@@ -115,6 +132,8 @@ expect 2 "connect from the profile times out on loopback" -- connect --profile "
 contains "connect from the profile names it" "Profile: Test PC" -- connect --profile "test pc" --store "$STORE" --poll-s 1 --timeout-s 1
 contains "connect from the profile sends the wake" "Wake request sent: 4 packets to 127.0.0.1" -- \
     connect --profile "Test PC" --store "$STORE" --poll-s 1 --timeout-s 1
+expect 1 "launch with profile and client flag" -- launch --profile "Test PC" --store "$STORE" --client custom --client-path /usr/bin/true
+expect 2 "launch with an unknown profile" -- launch --profile "Nobody" --store "$STORE" --dry-run
 expect 0 "profile remove" -- profile remove "Living Room PC (example)" --store "$STORE"
 expect 2 "profile remove twice" -- profile remove "Living Room PC (example)" --store "$STORE"
 printf 'this is not json' > "$STORE"
@@ -156,6 +175,12 @@ if command -v python3 >/dev/null 2>&1; then
     expect 0 "connect to an open loopback port" -- connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp
     contains "connect says no wake was needed" "no wake request was needed" -- \
         connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp --mac "$MAC" --to 127.0.0.1
+    expect 0 "connect launches a custom client once ready" -- \
+        connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp --client custom --client-path /usr/bin/true --client-args "{host}"
+    contains "connect reports the launch" "Launching custom client true 127.0.0.1" -- \
+        connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp --client custom --client-path /usr/bin/true --client-args "{host}"
+    expect 4 "connect fails with exit 4 when the client is missing" -- \
+        connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp --client custom --client-path /nonexistent/wakedeck-client
     kill "$LISTENER" 2>/dev/null
     wait "$LISTENER" 2>/dev/null
     rm -f "$PORTFILE"

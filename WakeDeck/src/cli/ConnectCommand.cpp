@@ -9,6 +9,7 @@
 
 #include "Flags.h"
 #include "SessionFlags.h"
+#include "engine/ClientLauncher.h"
 #include "engine/ProfileStore.h"
 #include "engine/ServiceProbe.h"
 #include "engine/Session.h"
@@ -37,16 +38,18 @@ void printConnectUsage(std::ostream& out) {
            "  wakedeck-cli connect --check-host <host> [--check-port 47989] [--check sunshine|tcp]\n"
            "                       [--probe-timeout-ms 2000] [--poll-s 3] [--timeout-s 120]\n"
            "                       [--mac <address> --to <host> [--ports 9,7] [--repeat 5] [--interval-ms 100]]\n"
+           "                       [--client none|moonlight|custom] [--client-path <path>] [--launch open|stream]\n"
+           "                       [--app <name>] [--client-args \"<arguments>\"]\n"
            "  wakedeck-cli connect --profile <name> [--store <file>] [--poll-s 3] [--timeout-s 120]\n"
            "\n"
            "Checks the service. If it is not ready and a wake is configured, sends the wake request,\n"
-           "then keeps checking until the service answers or --timeout-s runs out. Without a wake it\n"
-           "only waits. With --profile the settings come from a saved profile (see `profile --help`);\n"
-           "only --poll-s and --timeout-s may be given alongside it. Launching the client comes in a\n"
-           "later milestone.\n"
+           "then keeps checking until the service answers or --timeout-s runs out, and finally opens\n"
+           "the client. Without a wake it only waits; without a client it stops at \"ready\". With\n"
+           "--profile the settings come from a saved profile (see `profile --help`); only --poll-s and\n"
+           "--timeout-s may be given alongside it.\n"
            "\n"
-           "Exit codes: 0 ready, 1 usage error, 2 timed out or profile not found, 3 wake request failed,\n"
-           "            4 client not launched.\n";
+           "Exit codes: 0 ready and client launched, 1 usage error, 2 timed out or profile not found,\n"
+           "            3 wake request failed, 4 client not found or not launched.\n";
 }
 
 int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
@@ -87,6 +90,7 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
 int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
     Flags flags;
     std::set<std::string> known = sessionValueFlags();
+    known.insert(clientValueFlags().begin(), clientValueFlags().end());
     known.insert("--profile");
     known.insert("--store");
     if (const auto error = parseFlags(args, known, {}, flags)) return usageError(*error, printConnectUsage);
@@ -98,9 +102,10 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
 
     std::string error;
     SessionConfig config;
+    ClientConfig client;
     QString profileName;
     if (flags.has("--profile")) {
-        if (hasCheckOrWakeFlags(flags)) {
+        if (hasCheckOrWakeFlags(flags) || hasClientFlags(flags)) {
             return usageError("with --profile only --poll-s and --timeout-s may be given; the rest comes from the profile",
                               printConnectUsage);
         }
@@ -122,17 +127,23 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
         }
         profileName = profile->name;  // as saved, not as typed
         config = profile->toSessionConfig();
+        client = profile->client;
         if (!applyTimingOverrides(flags, config, error)) return usageError(error, printConnectUsage);
     } else {
         if (flags.has("--store")) return usageError("--store only makes sense together with --profile", printConnectUsage);
         const auto fromFlags = sessionConfigFromFlags(flags, error);
         if (!fromFlags) return usageError(error, printConnectUsage);
         config = *fromFlags;
+        const auto clientFromFlags = clientConfigFromFlags(flags, error);
+        if (!clientFromFlags) return usageError(error, printConnectUsage);
+        client = *clientFromFlags;
     }
 
     QCoreApplication app(argc, argv);
     if (!profileName.isEmpty()) std::cout << "Profile: " << profileName.toStdString() << std::endl;
-    Session session(config);
+    SessionFactories factories;
+    factories.launcher = makeLauncherFactory(client, config.check.host);
+    Session session(config, factories);
     int exitCode = 2;
     QObject::connect(&session, &Session::timelineEvent, &app, [](const TimelineEvent& e) {
         std::cout << stamp(e.at) << "  " << e.text.toStdString() << std::endl;

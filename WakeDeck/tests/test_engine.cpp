@@ -203,7 +203,8 @@ private slots:
         const ProbeResult result = SunshineProbe::interpretServerInfo(
             "<root status_code=\"200\"><state>SUNSHINE_SERVER_BUSY</state></root>");
         QVERIFY(result.ready());
-        QCOMPARE(result.detail, QStringLiteral("state busy"));
+        QVERIFY2(result.detail.startsWith(QStringLiteral("state busy")), qPrintable(result.detail));
+        QVERIFY(result.detail.contains(QStringLiteral("already active")));
     }
 
     void serverInfoWithoutStatusCodeIsAccepted() {

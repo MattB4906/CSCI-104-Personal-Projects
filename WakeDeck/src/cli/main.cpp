@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "ConnectCommand.h"
+#include "LaunchCommand.h"
 #include "ProfileCommand.h"
 #include "core/MacAddress.h"
 #include "core/MagicPacket.h"
@@ -40,6 +41,7 @@ void printGeneralUsage(std::ostream& out) {
         << "  wakedeck-cli check   --host <host> [options]                 ask once whether a service is ready\n"
         << "  wakedeck-cli connect --check-host <host> [options]           check, wake if needed, wait until ready\n"
         << "  wakedeck-cli connect --profile <name>                        the same, from a saved profile\n"
+        << "  wakedeck-cli launch  --profile <name> [--dry-run]            open the client only\n"
         << "  wakedeck-cli profile list|show|add|remove|import|export      manage saved profiles\n"
         << "  wakedeck-cli <command> --help                                options of one command\n"
         << "  wakedeck-cli --version\n";
@@ -234,6 +236,7 @@ int main(int argc, char** argv) {
     if (command == "check") return wakedeck::cli::runCheck(argc, argv, args);
     if (command == "connect") return wakedeck::cli::runConnect(argc, argv, args);
     if (command == "profile") return wakedeck::cli::runProfile(args);
+    if (command == "launch") return wakedeck::cli::runLaunch(argc, argv, args);
 
     std::cerr << "error: unknown command '" << command << "'\n\n";
     printGeneralUsage(std::cerr);

@@ -17,11 +17,13 @@ namespace wakedeck::cli {
 // --check-host, --check-port, --check, --probe-timeout-ms, --poll-s, --timeout-s,
 // --mac, --to, --ports, --repeat, --interval-ms
 const std::set<std::string>& sessionValueFlags();
-// --client, --client-path, --launch, --app
+// --client, --client-path, --launch, --app, --client-args
 const std::set<std::string>& clientValueFlags();
 
 // True when any session flag other than --poll-s and --timeout-s is present.
 bool hasCheckOrWakeFlags(const Flags& flags);
+// True when any client flag is present.
+bool hasClientFlags(const Flags& flags);
 
 // A check target from the given flag names (check and connect use different ones).
 std::optional<wakedeck::ProbeTarget> probeTargetFromFlags(const Flags& flags, const char* hostFlag,
