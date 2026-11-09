@@ -4,6 +4,7 @@
 #   make                 configure (first time) and build everything into build/
 #   make test            build, then run every test through ctest
 #   make run ARGS="..."  run build/wakedeck-cli (default: --help)
+#   make run-app         build, then open build/WakeDeck.app
 #   make clean           remove the build directory
 #
 # Requirements: CMake 3.21+, Qt 6 (Core, Network, Test), Ninja (optional).
@@ -31,7 +32,7 @@ ifneq ($(NINJA),)
 CMAKE_FLAGS += -DCMAKE_MAKE_PROGRAM=$(NINJA)
 endif
 
-.PHONY: all configure build test run clean
+.PHONY: all configure build test run run-app clean
 
 all: build
 
@@ -48,6 +49,9 @@ test: build
 
 run: build
 	$(BUILD_DIR)/wakedeck-cli $(ARGS)
+
+run-app: build
+	open $(BUILD_DIR)/WakeDeck.app
 
 clean:
 	rm -rf $(BUILD_DIR)

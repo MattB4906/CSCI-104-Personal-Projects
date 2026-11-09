@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 0.4.0 LANGUAGES CXX)
-set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}-m4")  # the one place the version is written
+project(WakeDeck VERSION 0.5.0 LANGUAGES CXX)
+set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}-m5")  # the one place the version is written
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +18,7 @@ endif()
 add_compile_options(-Wall -Wextra -pedantic)
 
 # 6.7 or later: QNetworkRequest::setTransferTimeout(std::chrono) and qt_standard_project_setup.
-find_package(Qt6 6.7 REQUIRED COMPONENTS Core Network Test)
+find_package(Qt6 6.7 REQUIRED COMPONENTS Core Network Widgets Test)
 qt_standard_project_setup()
 
 # Core: the portable wake logic. Plain C++17, no Qt. This is what Milestone 1 shipped.
@@ -73,6 +73,27 @@ add_executable(wakedeck-cli
 target_link_libraries(wakedeck-cli PRIVATE wakedeck_engine)
 target_compile_definitions(wakedeck-cli PRIVATE WAKEDECK_VERSION="${WAKEDECK_VERSION_STRING}")
 
+# The application: the window code is a library so the GUI tests can link it too.
+add_library(wakedeck_ui STATIC
+  src/app/MainWindow.h
+  src/app/MainWindow.cpp
+  src/app/ProfileEditorDialog.h
+  src/app/ProfileEditorDialog.cpp)
+target_include_directories(wakedeck_ui PUBLIC src)
+target_link_libraries(wakedeck_ui PUBLIC wakedeck_engine Qt6::Widgets)
+
+qt_add_executable(WakeDeck MACOSX_BUNDLE src/app/main.cpp)
+qt_add_resources(WakeDeck "wakedeck_examples" PREFIX "/examples" BASE "examples" FILES examples/example-profile.json)
+target_link_libraries(WakeDeck PRIVATE wakedeck_ui)
+target_compile_definitions(WakeDeck PRIVATE WAKEDECK_VERSION="${WAKEDECK_VERSION_STRING}")
+set_target_properties(WakeDeck PROPERTIES
+  OUTPUT_NAME "WakeDeck"
+  MACOSX_BUNDLE_BUNDLE_NAME "WakeDeck"
+  MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.MattB4906.WakeDeck"
+  MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+  MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+  MACOSX_BUNDLE_COPYRIGHT "MIT License. Uses the Qt framework (LGPL v3).")
+
 enable_testing()
 
 add_executable(test_core tests/test_core.cpp)
@@ -95,6 +116,12 @@ add_test(NAME test_profiles COMMAND test_profiles)
 add_executable(test_launcher tests/test_launcher.cpp)
 target_link_libraries(test_launcher PRIVATE wakedeck_engine Qt6::Test)
 add_test(NAME test_launcher COMMAND test_launcher)
+
+add_executable(test_gui tests/test_gui.cpp)
+qt_add_resources(test_gui "wakedeck_examples_test" PREFIX "/examples" BASE "examples" FILES examples/example-profile.json)
+target_link_libraries(test_gui PRIVATE wakedeck_ui Qt6::Test)
+add_test(NAME test_gui COMMAND test_gui)
+set_tests_properties(test_gui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_test(NAME cli_test
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_test.sh $<TARGET_FILE:wakedeck-cli>)

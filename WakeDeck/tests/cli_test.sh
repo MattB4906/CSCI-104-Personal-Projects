@@ -70,7 +70,7 @@ expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 -
 expect 1 "connect with bad check kind" -- connect --check-host 192.0.2.10 --check bogus
 expect 1 "connect with bad timeout" -- connect --check-host 192.0.2.10 --timeout-s 0
 
-contains "version string" "wakedeck-cli 0.4.0-m4" -- --version
+contains "version string" "wakedeck-cli 0.5.0-m5" -- --version
 contains "help lists check" "check" -- --help
 contains "help lists connect" "connect" -- --help
 contains "help lists profile" "profile" -- --help
@@ -175,7 +175,18 @@ if command -v python3 >/dev/null 2>&1; then
         --mac "$MAC" --to 127.0.0.1 --repeat 2 --interval-ms 0
 
     PORTFILE=$(mktemp)
-    python3 -I -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(1); print(s.getsockname()[1], flush=True); time.sleep(20)' > "$PORTFILE" &
+    # A listener that accepts and closes every connection, so its backlog never fills up.
+    python3 -I -c '
+import socket, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(16); s.settimeout(0.5)
+print(s.getsockname()[1], flush=True)
+end = time.time() + 30
+while time.time() < end:
+    try:
+        c, _ = s.accept(); c.close()
+    except socket.timeout:
+        pass
+' > "$PORTFILE" &
     LISTENER=$!
     sleep 1
     OPEN=$(cat "$PORTFILE")
