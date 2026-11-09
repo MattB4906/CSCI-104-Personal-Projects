@@ -1,7 +1,16 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 0.5.0 LANGUAGES CXX)
-set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}-m5")  # the one place the version is written
+project(WakeDeck VERSION 1.0.0 LANGUAGES CXX)
+set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}")  # the one place the version is written
+
+# The release script sets CMAKE_OSX_DEPLOYMENT_TARGET to 13.0 and builds against
+# Qt's official binaries, which run on macOS 13. A development build against
+# Homebrew's Qt only runs on the macOS version Homebrew built Qt for.
+if(CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(WAKEDECK_MIN_MACOS "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+else()
+  set(WAKEDECK_MIN_MACOS "13.0")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,12 +91,16 @@ add_library(wakedeck_ui STATIC
 target_include_directories(wakedeck_ui PUBLIC src)
 target_link_libraries(wakedeck_ui PUBLIC wakedeck_engine Qt6::Widgets)
 
-qt_add_executable(WakeDeck MACOSX_BUNDLE src/app/main.cpp)
+set(WAKEDECK_ICON ${CMAKE_CURRENT_SOURCE_DIR}/packaging/icon/WakeDeck.icns)
+set_source_files_properties(${WAKEDECK_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+qt_add_executable(WakeDeck MACOSX_BUNDLE src/app/main.cpp ${WAKEDECK_ICON})
 qt_add_resources(WakeDeck "wakedeck_examples" PREFIX "/examples" BASE "examples" FILES examples/example-profile.json)
 target_link_libraries(WakeDeck PRIVATE wakedeck_ui)
 target_compile_definitions(WakeDeck PRIVATE WAKEDECK_VERSION="${WAKEDECK_VERSION_STRING}")
 set_target_properties(WakeDeck PROPERTIES
   OUTPUT_NAME "WakeDeck"
+  MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/packaging/Info.plist.in"
+  MACOSX_BUNDLE_ICON_FILE "WakeDeck.icns"
   MACOSX_BUNDLE_BUNDLE_NAME "WakeDeck"
   MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.MattB4906.WakeDeck"
   MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"

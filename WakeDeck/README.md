@@ -2,7 +2,26 @@
 
 WakeDeck wakes a sleeping computer with a Wake-on-LAN "magic packet", waits until the service you need on it is actually ready, and then opens your client, for example Moonlight for a PC that runs Sunshine. It is written in C++17 with Qt 6 for macOS.
 
-**Status: Milestone 5 of 6, the graphical interface.** WakeDeck is now an app: a list of your computers, one **Wake & Connect** button, and a timeline that keeps "wake request sent" and "service ready" apart. The command-line tool remains for scripts and tests. The signed disk image follows in the last milestone; see [Current Scope](#current-scope).
+**Status: version 1.0.0, all six milestones complete.** WakeDeck is a signed, notarized Mac app: a list of your computers, one **Wake & Connect** button, and a timeline that keeps "wake request sent" and "service ready" apart. A command-line tool ships inside the app for scripts. See [Install](#install) to use it and [Current Scope](#current-scope) for what it does not do.
+
+## Install
+
+Requirements: a Mac with Apple Silicon running macOS 13 Ventura or later.
+
+1. Download `WakeDeck-1.0.0.dmg` from this repository's Releases page and open it.
+2. Drag **WakeDeck** onto **Applications**.
+3. Open WakeDeck from Applications. It is signed with a Developer ID and notarized by Apple, so it opens like any other downloaded app, with the usual one-time question about opening an app from the internet.
+4. Click **Add…** and describe your computer, or choose **File ▸ Load Example** to see a complete, fictional one first. The first time WakeDeck checks a computer on your own network, macOS may ask whether it may find devices on your local network; allow it, or wake requests and checks on the local network cannot work.
+
+The command-line tool is inside the app. To use it from Terminal:
+
+```bash
+/Applications/WakeDeck.app/Contents/MacOS/wakedeck-cli --help
+```
+
+It reads the same profiles as the app, so a computer added in the window is available as `wakedeck-cli connect --profile "<name>"`.
+
+To remove WakeDeck, move it from Applications to the Bin. Your computers are kept in `~/Library/Application Support/WakeDeck/profiles.json`; delete that folder too to remove them.
 
 ## Purpose
 
@@ -15,7 +34,7 @@ Anyone can add their own computers in the app: how to wake each one, which addre
 
 ## Features
 
-### Available now (Milestone 5)
+### In version 1.0.0
 
 - **The app.** Computers on the left; on the right the selected one, a big **Wake & Connect** button, the two facts of the current run ("Wake request: not sent / sent at 22:41:07", "Service: not checked / checking… / ready at 22:41:48 / not ready: timed out"), and the time-stamped timeline. **Check now**, **Wake only** and **Open client** do one step each. **Cancel** stops a run; **Keep waiting 1:00** appears while the app is waiting for the service. A timeout ends with the **What happened** box: what was observed, when the wake request went out, and likely causes, with **Try again** and **Copy details**.
 - **Adding a computer.** The editor has three groups, Wake, Check and Connect, each with a Test button that uses the real engine: send the wake request now, check the service now, or find the client without opening it. The MAC address, ports and every other value are validated with the same rules as the profiles file, so the dialog cannot save a half-configured computer. Browse… picks an application; the Wake group can be switched off for always-on computers. The editor works in whole seconds for the check interval and the overall limit; a profile file may hold milliseconds, which the editor rounds down if you edit it there.
@@ -25,9 +44,7 @@ Anyone can add their own computers in the app: how to wake each one, which addre
 - Nothing blocks the window: checks, name lookups, the pauses between packets and the client launch all run on the event loop.
 - Tests cover the packet logic, the real socket code over the loopback interface only, the probes against local servers (including a fake Sunshine), the waker, every path of the session with fakes, the explanation text, the profile format with its validation and recovery paths, the client lookup and launch with harmless programs only, the command-line behaviour end to end on loopback, and the window and the editor driven on Qt's offscreen platform with fake probes, wakers and launchers.
 
-### Planned
-
-- A signed and notarized disk image, built against Qt's official binaries so it runs on macOS 13 and later (Milestone 6).
+- **A real Mac app.** A signed and notarized disk image with its own icon, built against Qt's official binaries so it runs on macOS 13 and later, with the Qt frameworks and the command-line tool inside the bundle.
 
 ## How It Works
 
@@ -122,6 +139,10 @@ A few rules protect the file. It is written atomically, so a crash while saving 
 | `tests/test_engine.cpp`, `tests/test_profiles.cpp`, `tests/test_launcher.cpp` | Qt Test suites for the engine, the profiles and the launcher. |
 | `tests/test_gui.cpp` | Qt Test suite for the window and the editor on the offscreen platform, with fake probes, wakers and launchers and a temporary profiles folder. |
 | `tests/cli_test.sh` | Runs the built tool through usage errors, `--dry-run`, the `profile` command on a temporary store, `launch` with harmless clients, and `check`/`connect` on loopback ports. |
+| `packaging/Info.plist.in` | The app's Info.plist: identifier, version, icon, minimum macOS, the local-network explanation. |
+| `packaging/icon/` | `make-icon.swift` draws the icon with CoreGraphics; `make-icns.sh` turns it, or any 1024 × 1024 PNG, into `WakeDeck.icns`, which is committed. |
+| `packaging/get-qt.sh` | Downloads Qt's official macOS binaries for release builds with aqtinstall, no Qt account needed. |
+| `packaging/make-release.sh` | Builds, tests, bundles, signs, notarizes and staples the app, and produces the disk image with its checksum. |
 | `CMakeLists.txt`, `Makefile` | CMake defines the libraries, the app bundle, the tool and the tests; the Makefile is the entry point and drives CMake. |
 
 ### Object Relationships
@@ -146,7 +167,18 @@ make test           # runs every test through ctest
 make run ARGS="wake --mac 00:00:5E:00:53:2A --to 192.168.1.255 --dry-run"
 ```
 
-Qt installed elsewhere: `make QT_PREFIX=/path/to/Qt/6.x/macos`. Another build directory: `make BUILD_DIR=/path/outside/the/repo`. The app built this way is unsigned and links the Qt frameworks from your Qt installation; the signed, self-contained disk image is Milestone 6.
+Qt installed elsewhere: `make QT_PREFIX=/path/to/Qt/6.x/macos`. Another build directory: `make BUILD_DIR=/path/outside/the/repo`. The app built this way is unsigned and links the Qt frameworks from your Qt installation; it is for development on your own Mac.
+
+### Making a release
+
+The disk image is built against Qt's official binaries, not Homebrew's: Homebrew builds Qt for the macOS version it runs on, while Qt 6.11.3's official binaries run on macOS 13.0. Qt 6.12's official binaries need macOS 14.4, so 6.11.3 is the newest that keeps the macOS 13 promise. The maintainer needs, once: a **Developer ID Application** certificate in the login keychain, created by the Apple Developer account holder, and notarization credentials stored with `xcrun notarytool store-credentials WakeDeckNotary`.
+
+```bash
+sh packaging/get-qt.sh ~/Library/Developer/WakeDeck-Qt   # about 1.4 GB, outside iCloud
+make release QT_DIR=~/Library/Developer/WakeDeck-Qt/Qt/6.11.3/macos
+```
+
+`make-release.sh` configures a Release build for macOS 13.0 and Apple Silicon, runs every test against it, copies the app and the command-line tool into a staging folder, lets `macdeployqt` copy the Qt frameworks and plug-ins into the bundle, and fails if any library still points outside the bundle. It signs every library, framework and executable from the inside out with the hardened runtime and a secure timestamp, submits the app to Apple's notary service and staples the ticket, builds the disk image with an Applications shortcut, signs it, notarizes and staples it too, and finally asks Gatekeeper for its verdict on both. The signing identity is read from the keychain and the notarization credentials stay there, so nothing personal enters the repository. `SKIP_NOTARIZE=1` makes a signed image without contacting Apple, and `ARCHS="arm64;x86_64"` builds a universal app, untested on Intel Macs so far.
 
 Commands of the tool:
 
@@ -183,17 +215,32 @@ Exit codes. `wake`: 0 all packets sent, 1 usage error, 2 destination not resolve
 
 Not covered automatically: opening a real graphical application such as Moonlight, the look of the window on a real screen, the plain TCP check's own *timed out* path, the *unreachable* and *name not resolved* classifications of the real probes, and a real wake reaching a real PC. The author has run the full flow against a real PC from the command line: wake over Wake-on-LAN, Sunshine answering over Tailscale 26 seconds later.
 
+The release script adds its own checks: the same seven tests against the release build, no library linking outside the bundle, a strict deep signature check, Apple's notarization verdict for the app and for the disk image, stapled tickets validated, and Gatekeeper's assessment of both.
+
+### Acceptance test
+
+A release is ready when a second person can do the following on their own Mac, with only the disk image and this README, without opening Terminal or editing any file:
+
+1. Install WakeDeck by dragging it to Applications, and open it without any security workaround.
+2. Add their own computer in the editor in a few minutes, with the three Test buttons all answering.
+3. With the computer asleep, click **Wake & Connect** and see "Wake request: sent", then "Service: ready", then the client opening.
+4. With the computer already awake, see the client open within a few seconds and the timeline say no wake was needed.
+5. With a deliberately wrong MAC address, see the wake request reported as sent and the service as timed out, with a **What happened** explanation instead of a success.
+6. With the client moved away, see **Locate client…** offered and working.
+7. Export the profile and find nothing secret in it.
+
 ## Current Scope
 
-Milestone 5 of 6. Planned sequence: command-line wake prototype, readiness check and session, saved profiles, macOS app lookup and launch, Qt Widgets interface (this), packaging and release.
+Version 1.0.0, after six milestones: command-line wake prototype, readiness check and session, saved profiles, macOS app lookup and launch, Qt Widgets interface, packaging and release.
 
-Not here yet, and worth knowing:
+Not here, and worth knowing:
 
-- The app has no icon and is not signed; it runs from the build folder. Milestone 6 produces the disk image.
+- Apple Silicon only in the published disk image; Intel Macs would need a universal build that has not been tested.
+- No automatic updates; new versions are downloaded by hand.
 - Stream mode runs Moonlight's executable directly, so the arguments always arrive even if Moonlight is already open; a second Moonlight window may then appear until the first is closed.
 - IPv4 only. SecureOn passwords are not supported.
 - macOS only, by design: the client launcher uses Launch Services and NSWorkspace.
-- Binaries built against Homebrew's Qt run on the macOS version they were built on, or newer. The release build in Milestone 6 will use Qt's official binaries so the disk image runs on macOS 13 and later.
+- Development builds against Homebrew's Qt run only on the macOS version Homebrew built Qt for; the published disk image uses Qt's official binaries and runs on macOS 13 and later.
 
 ## Concepts Demonstrated
 
@@ -206,7 +253,8 @@ Not here yet, and worth knowing:
 - A graphical interface kept thin: Qt Widgets, layouts and dialogs that only display what the engine reports, testable on the offscreen platform without a screen.
 - BSD sockets and HTTP by hand on the test side: `getaddrinfo`, `socket`, `setsockopt(SO_BROADCAST)`, `sendto`, `bind`, `recvfrom`, a fake HTTP server built on `QTcpServer`.
 - Build systems: a Makefile with pattern rules in Milestone 1, then CMake targets, static libraries, Qt's automatic moc, a second language in one target, a macOS application bundle and embedded resources, with the Makefile kept as the entry point.
+- Shipping software on macOS: deployment targets and how to verify them in the binaries (`vtool`), bundling frameworks with `macdeployqt`, code signing from the inside out, the hardened runtime, notarization and stapling, and Gatekeeper's assessment.
 
 ## License
 
-MIT, see [LICENSE](./LICENSE). WakeDeck uses the Qt framework under the LGPL v3, linked dynamically; the app's About box carries Qt's notice.
+MIT, see [LICENSE](./LICENSE). WakeDeck uses the Qt framework under the LGPL v3. The published app links Qt dynamically: Qt's frameworks sit unmodified in `WakeDeck.app/Contents/Frameworks`, where they can be replaced, and the app's About box carries Qt's notice. Qt's own sources are available from qt.io.

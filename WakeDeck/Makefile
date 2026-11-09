@@ -5,6 +5,8 @@
 #   make test            build, then run every test through ctest
 #   make run ARGS="..."  run build/wakedeck-cli (default: --help)
 #   make run-app         build, then open build/WakeDeck.app
+#   make release QT_DIR=/path/to/Qt/6.11.3/macos
+#                        signed, notarized disk image (see packaging/make-release.sh)
 #   make clean           remove the build directory
 #
 # Requirements: CMake 3.21+, Qt 6 (Core, Network, Test), Ninja (optional).
@@ -32,7 +34,7 @@ ifneq ($(NINJA),)
 CMAKE_FLAGS += -DCMAKE_MAKE_PROGRAM=$(NINJA)
 endif
 
-.PHONY: all configure build test run run-app clean
+.PHONY: all configure build test run run-app release clean
 
 all: build
 
@@ -52,6 +54,9 @@ run: build
 
 run-app: build
 	open $(BUILD_DIR)/WakeDeck.app
+
+release:
+	QT_DIR="$(QT_DIR)" sh packaging/make-release.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

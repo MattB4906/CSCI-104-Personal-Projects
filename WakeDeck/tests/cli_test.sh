@@ -70,7 +70,7 @@ expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 -
 expect 1 "connect with bad check kind" -- connect --check-host 192.0.2.10 --check bogus
 expect 1 "connect with bad timeout" -- connect --check-host 192.0.2.10 --timeout-s 0
 
-contains "version string" "wakedeck-cli 0.5.0-m5" -- --version
+contains "version string" "wakedeck-cli 1.0.0" -- --version
 contains "help lists check" "check" -- --help
 contains "help lists connect" "connect" -- --help
 contains "help lists profile" "profile" -- --help
