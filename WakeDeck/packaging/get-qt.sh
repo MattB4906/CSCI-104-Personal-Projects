@@ -20,7 +20,8 @@ if [ ! -x "$ROOT/aqt-venv/bin/aqt" ]; then
     /usr/bin/python3 -m venv "$ROOT/aqt-venv"
     "$ROOT/aqt-venv/bin/pip" install --quiet --upgrade pip aqtinstall
 fi
-"$ROOT/aqt-venv/bin/aqt" install-qt mac desktop "$QT_VERSION" clang_64 -O "$ROOT/Qt"
+# aqt writes aqtinstall.log into the current folder: keep it next to Qt.
+(cd "$ROOT" && "$ROOT/aqt-venv/bin/aqt" install-qt mac desktop "$QT_VERSION" clang_64 -O "$ROOT/Qt")
 
 QT_DIR="$ROOT/Qt/$QT_VERSION/macos"
 minos=$(vtool -show-build "$QT_DIR/lib/QtCore.framework/QtCore" | awk '/minos/{print $2}' | sort -u | tr '\n' ' ')

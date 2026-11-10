@@ -26,6 +26,8 @@ step() { printf '\n==> %s\n' "$*"; }
 SRC=$(pwd)
 QT_DIR=${QT_DIR:-}
 [ -n "$QT_DIR" ] || die "set QT_DIR to Qt's official macOS binaries (sh packaging/get-qt.sh <folder>)"
+# zsh leaves "~" unexpanded in VAR=~/... arguments to make; expand it here.
+case "$QT_DIR" in "~/"*) QT_DIR="$HOME/${QT_DIR#\~/}" ;; esac
 [ -x "$QT_DIR/bin/macdeployqt" ] || die "$QT_DIR/bin/macdeployqt not found"
 NOTARY_PROFILE=${NOTARY_PROFILE:-WakeDeckNotary}
 BUILD_DIR=${BUILD_DIR:-${TMPDIR:-/tmp}/wakedeck-release}
@@ -50,6 +52,9 @@ echo "Qt:         $QT_DIR"
 echo "Build:      $BUILD_DIR"
 
 step "Configure and build (Release, macOS $MIN_MACOS, $ARCHS)"
+# Always from scratch: a CMake cache from an earlier build remembers where it
+# found each Qt module and would silently keep using that Qt.
+rm -rf "$BUILD_DIR/build"
 "$CMAKE" -S "$SRC" -B "$BUILD_DIR/build" -G Ninja -DCMAKE_MAKE_PROGRAM="$NINJA" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH="$QT_DIR" -DQt6_DIR="$QT_DIR/lib/cmake/Qt6" \
@@ -68,13 +73,36 @@ ditto "$BUILD_DIR/build/WakeDeck.app" "$APP"
 cp "$BUILD_DIR/build/wakedeck-cli" "$APP/Contents/MacOS/wakedeck-cli"
 "$QT_DIR/bin/macdeployqt" "$APP" -executable="$APP/Contents/MacOS/wakedeck-cli" -verbose=1
 
+MACHO_LIST="$BUILD_DIR/macho-files.txt"
+find "$APP" -type f \( -perm -u+x -o -name '*.dylib' \) -exec sh -c 'file -b "$1" | grep -q Mach-O' sh {} \; -print > "$MACHO_LIST"
+
 # Nothing may still point outside the bundle, at the build machine's Qt or Homebrew.
-if find "$APP" -type f -perm -u+x -o -type f -name '*.dylib' | while read -r f; do
-       otool -L "$f" 2>/dev/null | tail -n +2 | grep -E "$QT_DIR|/opt/homebrew|/usr/local" && echo "  in $f"
-   done | grep -q .; then
-    die "the bundle still links to libraries outside it (see above)"
+BAD_LINKS="$BUILD_DIR/bad-links.txt"
+: > "$BAD_LINKS"
+while read -r f; do
+    otool -L "$f" | tail -n +2 | grep -E "$QT_DIR|/opt/homebrew|/usr/local" | sed "s#^#$f: #" >> "$BAD_LINKS" || true
+done < "$MACHO_LIST"
+if [ -s "$BAD_LINKS" ]; then
+    cat "$BAD_LINKS"
+    die "the bundle still links to libraries outside it (listed above)"
 fi
-echo "All libraries resolve inside the bundle or to the system."
+echo "All libraries resolve inside the bundle or to the system ($(wc -l < "$MACHO_LIST" | tr -d ' ') binaries)."
+
+# Every binary must run on the promised macOS version; this also catches a
+# framework that came from a different Qt than QT_DIR.
+TOO_NEW="$BUILD_DIR/too-new.txt"
+: > "$TOO_NEW"
+while read -r f; do
+    for v in $(vtool -show-build "$f" | awk '/minos/{print $2}'); do
+        newest=$(printf '%s\n%s\n' "$v" "$MIN_MACOS" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+        [ "$newest" = "$MIN_MACOS" ] || echo "$f needs macOS $v" >> "$TOO_NEW"
+    done
+done < "$MACHO_LIST"
+if [ -s "$TOO_NEW" ]; then
+    cat "$TOO_NEW"
+    die "some binaries need a newer macOS than $MIN_MACOS (listed above)"
+fi
+echo "Every binary runs on macOS $MIN_MACOS."
 
 step "Sign inside out with the hardened runtime"
 sign() { codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$@"; }
@@ -83,16 +111,27 @@ find "$APP/Contents/Frameworks" -maxdepth 1 -name '*.framework' | while read -r 
 sign "$APP/Contents/MacOS/wakedeck-cli"
 sign "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
-codesign -dv "$APP" 2>&1 | grep -E 'Authority=Developer ID Application|flags=.*runtime|TeamIdentifier'
+SIGNATURE=$(codesign -dvv "$APP" 2>&1)
+for expected in 'Authority=Developer ID Application' 'flags=.*runtime' 'Timestamp='; do
+    printf '%s\n' "$SIGNATURE" | grep -qE "$expected" || die "the app's signature lacks: $expected"
+done
+printf '%s\n' "$SIGNATURE" | grep -E '^Authority=Developer ID Application|^TeamIdentifier|runtime|^Timestamp'
 
 notarize() {
-    # $1: file to submit. Prints Apple's log and stops on anything but Accepted.
-    result=$(xcrun notarytool submit "$1" --keychain-profile "$NOTARY_PROFILE" --wait --output-format plist)
+    # $1: file to submit. Prints Apple's answer and log and stops on anything but Accepted.
+    if result=$(xcrun notarytool submit "$1" --keychain-profile "$NOTARY_PROFILE" --wait --output-format plist 2>&1); then
+        submit_ok=1
+    else
+        submit_ok=0
+    fi
     status=$(printf '%s' "$result" | plutil -extract status raw - 2>/dev/null || echo unknown)
     id=$(printf '%s' "$result" | plutil -extract id raw - 2>/dev/null || echo "")
-    echo "Notarization of $(basename "$1"): $status (submission $id)"
-    if [ "$status" != "Accepted" ]; then
-        [ -n "$id" ] && xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE"
+    echo "Notarization of $(basename "$1"): $status (submission ${id:-none})"
+    if [ "$submit_ok" != 1 ] || [ "$status" != "Accepted" ]; then
+        printf '%s\n' "$result"
+        if [ -n "$id" ]; then
+            xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" || echo "(Apple's log could not be fetched)"
+        fi
         die "notarization was not accepted"
     fi
 }

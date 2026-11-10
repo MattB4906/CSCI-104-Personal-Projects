@@ -11,3 +11,5 @@ test_core
 test_loopback
 test_engine
 *.dmg
+*.dmg.sha256
+aqtinstall.log

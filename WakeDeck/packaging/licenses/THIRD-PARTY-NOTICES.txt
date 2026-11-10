@@ -1,0 +1,34 @@
+WakeDeck third-party notices
+============================
+
+WakeDeck itself is released under the MIT License (see LICENSE in the
+source repository: https://github.com/MattB4906/CSCI-104-Personal-Projects).
+
+Qt
+--
+WakeDeck uses the Qt framework, version 6.11.3, from The Qt Company Ltd. and
+other contributors, under the GNU Lesser General Public License version 3
+(LGPL-3.0.txt, next to this file), which builds on the GNU General Public
+License version 3 (GPL-3.0.txt, next to this file).
+
+Modules used: Qt Core, Qt Gui, Qt Widgets, Qt Network, Qt Svg and Qt DBus,
+together with the Qt platform, style, image-format, icon-engine, TLS and
+network-information plug-ins copied in by Qt's deployment tool.
+
+Qt is linked dynamically and was not modified. The libraries are the files
+in WakeDeck.app/Contents/Frameworks and WakeDeck.app/Contents/PlugIns, exactly
+as Qt's official 6.11.3 macOS binaries ship them, apart from the code
+signature added for distribution.
+
+The complete corresponding source code of Qt 6.11.3 is available at:
+  https://download.qt.io/official_releases/qt/6.11/6.11.3/single/
+and on request from the WakeDeck author through the source repository above.
+
+Replacing the Qt libraries: you may replace any of those files with your own
+build of the same Qt version. Because WakeDeck is signed and uses the hardened
+runtime, macOS will then refuse to load the modified bundle until it is signed
+again; signing it for use on your own Mac is enough:
+  codesign --force --deep --sign - /Applications/WakeDeck.app
+The WakeDeck object code needed to relink against a different Qt is the
+WakeDeck source code itself, which is available in full from the source
+repository above.

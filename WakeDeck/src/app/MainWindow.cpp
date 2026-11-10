@@ -699,9 +699,12 @@ void MainWindow::showHowWakingWorks() {
 void MainWindow::showAbout() {
     QMessageBox::about(this, QStringLiteral("About WakeDeck"),
                        QStringLiteral("<b>WakeDeck %1</b><br>Wake a computer, wait until its service is ready, open your "
-                                      "client.<br><br>MIT License. Built with the Qt framework (LGPL v3), linked "
-                                      "dynamically; see <a href=\"https://www.qt.io/licensing\">qt.io/licensing</a>.")
-                           .arg(QCoreApplication::applicationVersion()));
+                                      "client.<br><br>MIT License. Uses the Qt framework %2 under the GNU LGPL v3, "
+                                      "linked dynamically. The licence texts and the notice on how to obtain Qt's "
+                                      "source and replace its libraries are in WakeDeck.app/Contents/Resources/Licenses. "
+                                      "Source code: <a href=\"https://github.com/MattB4906/CSCI-104-Personal-Projects\">"
+                                      "github.com/MattB4906/CSCI-104-Personal-Projects</a>.")
+                           .arg(QCoreApplication::applicationVersion(), QString::fromLatin1(qVersion())));
 }
 
 void MainWindow::showError(const QString& title, const QString& text) {

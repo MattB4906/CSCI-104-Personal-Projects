@@ -141,6 +141,7 @@ A few rules protect the file. It is written atomically, so a crash while saving 
 | `tests/cli_test.sh` | Runs the built tool through usage errors, `--dry-run`, the `profile` command on a temporary store, `launch` with harmless clients, and `check`/`connect` on loopback ports. |
 | `packaging/Info.plist.in` | The app's Info.plist: identifier, version, icon, minimum macOS, the local-network explanation. |
 | `packaging/icon/` | `make-icon.swift` draws the icon with CoreGraphics; `make-icns.sh` turns it, or any 1024 × 1024 PNG, into `WakeDeck.icns`, which is committed. |
+| `packaging/licenses/` | The GNU LGPL v3 and GPL v3 texts and the third-party notice for Qt, copied into the app bundle. |
 | `packaging/get-qt.sh` | Downloads Qt's official macOS binaries for release builds with aqtinstall, no Qt account needed. |
 | `packaging/make-release.sh` | Builds, tests, bundles, signs, notarizes and staples the app, and produces the disk image with its checksum. |
 | `CMakeLists.txt`, `Makefile` | CMake defines the libraries, the app bundle, the tool and the tests; the Makefile is the entry point and drives CMake. |
@@ -174,11 +175,11 @@ Qt installed elsewhere: `make QT_PREFIX=/path/to/Qt/6.x/macos`. Another build di
 The disk image is built against Qt's official binaries, not Homebrew's: Homebrew builds Qt for the macOS version it runs on, while Qt 6.11.3's official binaries run on macOS 13.0. Qt 6.12's official binaries need macOS 14.4, so 6.11.3 is the newest that keeps the macOS 13 promise. The maintainer needs, once: a **Developer ID Application** certificate in the login keychain, created by the Apple Developer account holder, and notarization credentials stored with `xcrun notarytool store-credentials WakeDeckNotary`.
 
 ```bash
-sh packaging/get-qt.sh ~/Library/Developer/WakeDeck-Qt   # about 1.4 GB, outside iCloud
-make release QT_DIR=~/Library/Developer/WakeDeck-Qt/Qt/6.11.3/macos
+sh packaging/get-qt.sh "$HOME/Library/Developer/WakeDeck-Qt"   # about 1.4 GB, outside iCloud
+make release QT_DIR="$HOME/Library/Developer/WakeDeck-Qt/Qt/6.11.3/macos"
 ```
 
-`make-release.sh` configures a Release build for macOS 13.0 and Apple Silicon, runs every test against it, copies the app and the command-line tool into a staging folder, lets `macdeployqt` copy the Qt frameworks and plug-ins into the bundle, and fails if any library still points outside the bundle. It signs every library, framework and executable from the inside out with the hardened runtime and a secure timestamp, submits the app to Apple's notary service and staples the ticket, builds the disk image with an Applications shortcut, signs it, notarizes and staples it too, and finally asks Gatekeeper for its verdict on both. The signing identity is read from the keychain and the notarization credentials stay there, so nothing personal enters the repository. `SKIP_NOTARIZE=1` makes a signed image without contacting Apple, and `ARCHS="arm64;x86_64"` builds a universal app, untested on Intel Macs so far.
+`make-release.sh` configures a fresh Release build for macOS 13.0 and Apple Silicon, runs every test against it, copies the app and the command-line tool into a staging folder, lets `macdeployqt` copy the Qt frameworks and plug-ins into the bundle, and fails if any library still points outside the bundle or any binary needs a newer macOS than 13.0. It signs every library, framework and executable from the inside out with the hardened runtime and a secure timestamp, submits the app to Apple's notary service and staples the ticket, builds the disk image with an Applications shortcut, signs it, notarizes and staples it too, and finally asks Gatekeeper for its verdict on both. The signing identity is read from the keychain and the notarization credentials stay there, so nothing personal enters the repository. `SKIP_NOTARIZE=1` makes a signed image without contacting Apple, and `ARCHS="arm64;x86_64"` builds a universal app, untested on Intel Macs so far.
 
 Commands of the tool:
 
@@ -215,7 +216,7 @@ Exit codes. `wake`: 0 all packets sent, 1 usage error, 2 destination not resolve
 
 Not covered automatically: opening a real graphical application such as Moonlight, the look of the window on a real screen, the plain TCP check's own *timed out* path, the *unreachable* and *name not resolved* classifications of the real probes, and a real wake reaching a real PC. The author has run the full flow against a real PC from the command line: wake over Wake-on-LAN, Sunshine answering over Tailscale 26 seconds later.
 
-The release script adds its own checks: the same seven tests against the release build, no library linking outside the bundle, a strict deep signature check, Apple's notarization verdict for the app and for the disk image, stapled tickets validated, and Gatekeeper's assessment of both.
+The release script adds its own checks: the same seven tests against a fresh release build, no library linking outside the bundle, every binary running on macOS 13.0, a strict deep signature check, Apple's notarization verdict for the app and for the disk image, stapled tickets validated, and Gatekeeper's assessment of both.
 
 ### Acceptance test
 
@@ -257,4 +258,4 @@ Not here, and worth knowing:
 
 ## License
 
-MIT, see [LICENSE](./LICENSE). WakeDeck uses the Qt framework under the LGPL v3. The published app links Qt dynamically: Qt's frameworks sit unmodified in `WakeDeck.app/Contents/Frameworks`, where they can be replaced, and the app's About box carries Qt's notice. Qt's own sources are available from qt.io.
+MIT, see [LICENSE](./LICENSE). WakeDeck uses the Qt framework 6.11.3 under the GNU LGPL v3, linked dynamically and unmodified. The published app carries the LGPL v3 and GPL v3 texts and a third-party notice in `WakeDeck.app/Contents/Resources/Licenses` (from [packaging/licenses](./packaging/licenses/)), and the About box points there. Qt's complete source code for that version is at download.qt.io/official_releases/qt/6.11/6.11.3/single/. Qt's libraries sit in `WakeDeck.app/Contents/Frameworks` and `Contents/PlugIns` and can be replaced with your own build; because the app is signed with the hardened runtime, macOS then requires the modified app to be signed again, for example ad hoc with `codesign --force --deep --sign - WakeDeck.app`, as the notice explains.

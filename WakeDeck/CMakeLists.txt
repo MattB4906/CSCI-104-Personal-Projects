@@ -93,7 +93,14 @@ target_link_libraries(wakedeck_ui PUBLIC wakedeck_engine Qt6::Widgets)
 
 set(WAKEDECK_ICON ${CMAKE_CURRENT_SOURCE_DIR}/packaging/icon/WakeDeck.icns)
 set_source_files_properties(${WAKEDECK_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-qt_add_executable(WakeDeck MACOSX_BUNDLE src/app/main.cpp ${WAKEDECK_ICON})
+# The Qt licence texts and notice travel inside the app (LGPL v3, section 4).
+set(WAKEDECK_LICENSES
+  ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
+  ${CMAKE_CURRENT_SOURCE_DIR}/packaging/licenses/THIRD-PARTY-NOTICES.txt
+  ${CMAKE_CURRENT_SOURCE_DIR}/packaging/licenses/LGPL-3.0.txt
+  ${CMAKE_CURRENT_SOURCE_DIR}/packaging/licenses/GPL-3.0.txt)
+set_source_files_properties(${WAKEDECK_LICENSES} PROPERTIES MACOSX_PACKAGE_LOCATION Resources/Licenses)
+qt_add_executable(WakeDeck MACOSX_BUNDLE src/app/main.cpp ${WAKEDECK_ICON} ${WAKEDECK_LICENSES})
 qt_add_resources(WakeDeck "wakedeck_examples" PREFIX "/examples" BASE "examples" FILES examples/example-profile.json)
 target_link_libraries(WakeDeck PRIVATE wakedeck_ui)
 target_compile_definitions(WakeDeck PRIVATE WAKEDECK_VERSION="${WAKEDECK_VERSION_STRING}")
