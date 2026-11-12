@@ -16,8 +16,17 @@ struct Observation {
     ProbeResult result;
 };
 
+// What Tailscale on this Mac showed when the run timed out (read once more then).
+enum class TailscaleAtTimeout {
+    NotRead,        // not a Tailscale host, the tool gave no answer, or the device is not one of its devices
+    DeviceOnline,   // Tailscale shows the computer online
+    DeviceOffline,  // Tailscale shows the computer offline
+    NotRunning,     // Tailscale is no longer connected on this Mac
+};
+
 struct Observations {
     ProbeTarget check;
+    TailscaleAtTimeout tailscale = TailscaleAtTimeout::NotRead;
     bool wakeConfigured = false;
     bool wakeSent = false;
     QDateTime wakeAt;      // the first wake request that was sent

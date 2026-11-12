@@ -58,6 +58,10 @@ add_library(wakedeck_engine STATIC
   src/engine/Explain.cpp
   src/engine/Session.h
   src/engine/Session.cpp
+  src/engine/Tailscale.h
+  src/engine/Tailscale.cpp
+  src/engine/TimingHistory.h
+  src/engine/TimingHistory.cpp
   src/engine/Profile.h
   src/engine/Profile.cpp
   src/engine/ProfileStore.h

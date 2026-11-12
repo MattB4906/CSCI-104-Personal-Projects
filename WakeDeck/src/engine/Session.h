@@ -17,6 +17,8 @@
 #include "ProbeResult.h"
 #include "QtWaker.h"
 #include "ServiceProbe.h"
+#include "Tailscale.h"
+#include "TimingHistory.h"
 
 class QTimer;
 
@@ -31,10 +33,16 @@ struct SessionConfig {
     int resendIntervalMs = 0;
     int pollIntervalMs = 3000;
     int overallTimeoutMs = 120000;
+    // What WakeDeck has learned about this computer (the window and
+    // `connect --profile` fill it from the history): after the wake request the
+    // timeline says what is usual, and later whether this run takes longer.
+    std::optional<LearnedTiming> learned;
 };
 
 enum class SessionState { Idle, Checking, Waking, Waiting, Launching, Done, Failed };
-enum class Outcome { ReadyWithoutWake, ReadyAfterWake, TimedOut, WakeFailed, LaunchFailed, Cancelled };
+// TailscaleOff: the check host is a Tailscale one and Tailscale on this Mac is
+// not connected, so the run ended before any check or wake request.
+enum class Outcome { ReadyWithoutWake, ReadyAfterWake, TimedOut, WakeFailed, LaunchFailed, Cancelled, TailscaleOff };
 QString stateName(SessionState state);
 QString outcomeName(Outcome outcome);
 
@@ -80,6 +88,8 @@ struct SessionFactories {
     ProbeFactory probe = makeProbe;
     WakerFactory waker = makeWaker;
     LauncherFactory launcher = [](QObject* parent) -> Launcher* { return new NoLauncher(parent); };
+    // Used only when the check host looks like a Tailscale address; may return nullptr.
+    TailscaleReaderFactory tailscale = makeTailscaleReader;
 };
 
 class Session final : public QObject {
@@ -99,6 +109,9 @@ public:
     qint64 launchedPid() const { return launchedPid_; }
     qint64 runningPid() const { return runningPid_; }
     QString launchedClient() const { return launchedClient_; }
+    // From the first wake request to the service answering; empty when no wake
+    // request was sent or the service never answered.
+    std::optional<qint64> wakeToReadyMs() const { return wakeToReadyMs_; }
 
 signals:
     void stateChanged(wakedeck::SessionState state);
@@ -108,7 +121,11 @@ signals:
 private:
     void setState(SessionState state);
     void emitEvent(EventKind kind, const QString& text);
+    void beginChecks();
     void runCheck();
+    void readTailscale();
+    void onTailscaleRead(const TailscaleStatus& status);
+    void concludeTimeout();
     void onProbeFinished(const ProbeResult& result);
     void scheduleNextCheck();
     void sendWake();
@@ -134,6 +151,14 @@ private:
     Waker* waker_ = nullptr;
     Launcher* launcher_ = nullptr;
     QTimer* resendTimer_ = nullptr;  // single shot; armed only while waiting with no waker in flight
+    // Tailscale: read before the first check and, if that answered, once more at a timeout.
+    TailscaleReader* tailscale_ = nullptr;
+    bool tailscaleAnswered_ = false;  // the first read gave a status
+    bool concluding_ = false;         // timed out; reading Tailscale once more before finishing
+    // Learned timing.
+    QElapsedTimer wakeClock_;         // started with the first wake request
+    QTimer* longerTimer_ = nullptr;   // "Taking longer than usual"
+    std::optional<qint64> wakeToReadyMs_;
 };
 
 // "1st", "2nd", "3rd", "4th", "11th", "21st"

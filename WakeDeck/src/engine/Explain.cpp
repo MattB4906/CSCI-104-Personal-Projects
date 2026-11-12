@@ -62,6 +62,25 @@ QString explainTimeout(const Observations& o) {
     const bool allSilent = !o.checks.empty() && silent == static_cast<int>(o.checks.size());
     const QString port = QString::number(o.check.port);
 
+    // What Tailscale itself showed at the end, attributed to it.
+    switch (o.tailscale) {
+    case TailscaleAtTimeout::DeviceOnline:
+        lines << QStringLiteral("- Tailscale shows the computer online, so it is awake and connected; the service on "
+                                "port %1 did not answer: check that it is running.")
+                     .arg(port);
+        break;
+    case TailscaleAtTimeout::DeviceOffline:
+        lines << QStringLiteral("- Tailscale still shows the computer offline, so it most likely did not wake up, or "
+                                "woke up without Tailscale.");
+        break;
+    case TailscaleAtTimeout::NotRunning:
+        lines << QStringLiteral("- Tailscale is no longer connected on this Mac, so %1 cannot be reached through it. "
+                                "Turn Tailscale on and try again.")
+                     .arg(o.check.host);
+        break;
+    case TailscaleAtTimeout::NotRead: break;
+    }
+
     if (counts[ProbeStatus::ResolveFailed] > 0) {
         lines << QStringLiteral("- The name %1 could not be resolved. Check the spelling, or whether the VPN that "
                                 "provides this name is connected on this computer.")

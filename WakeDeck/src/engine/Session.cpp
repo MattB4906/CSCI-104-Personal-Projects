@@ -2,6 +2,7 @@
 
 #include <QTimer>
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace wakedeck {
@@ -26,6 +27,7 @@ QString outcomeName(Outcome outcome) {
     case Outcome::TimedOut: return QStringLiteral("timed out");
     case Outcome::WakeFailed: return QStringLiteral("wake request failed");
     case Outcome::LaunchFailed: return QStringLiteral("client not launched");
+    case Outcome::TailscaleOff: return QStringLiteral("Tailscale not connected");
     case Outcome::Cancelled: break;
     }
     return QStringLiteral("cancelled");
@@ -59,8 +61,78 @@ void Session::start() {
     if (state_ != SessionState::Idle) return;
     elapsed_.start();
     setState(SessionState::Checking);
+    // A Tailscale host: first ask Tailscale on this Mac, without blocking. Any
+    // other host, or no answer from the tool, goes straight to the checks.
+    if (looksLikeTailscale(config_.check.host) && factories_.tailscale) {
+        tailscale_ = factories_.tailscale(this);
+        if (tailscale_) {
+            connect(tailscale_, &TailscaleReader::finished, this, &Session::onTailscaleRead);
+            tailscale_->start();
+            return;
+        }
+    }
+    beginChecks();
+}
+
+void Session::beginChecks() {
     emitEvent(EventKind::Info, QStringLiteral("Checking %1").arg(describe(config_.check)));
     runCheck();
+}
+
+void Session::onTailscaleRead(const TailscaleStatus& status) {
+    if (tailscale_) {
+        tailscale_->deleteLater();
+        tailscale_ = nullptr;
+    }
+    if (finished_) return;
+
+    if (concluding_) {
+        // The second read, at the time limit: what Tailscale shows now, attributed to it.
+        if (status.available && !status.running()) {
+            observations_.tailscale = TailscaleAtTimeout::NotRunning;
+        } else if (const TailscalePeer* peer = status.available ? findTailscalePeer(status, config_.check.host) : nullptr) {
+            observations_.tailscale = peer->online ? TailscaleAtTimeout::DeviceOnline : TailscaleAtTimeout::DeviceOffline;
+        }
+        finish(Outcome::TimedOut, explainTimeout(observations_));
+        return;
+    }
+
+    if (!status.available) {  // missing, failing or slow tool: exactly as without Tailscale
+        beginChecks();
+        return;
+    }
+    tailscaleAnswered_ = true;
+    if (!status.running()) {
+        const QString line = describeTailscale(status, config_.check.host);
+        emitEvent(EventKind::Failure, line);
+        finish(Outcome::TailscaleOff, QStringLiteral("%1, so %2 cannot be reached. Turn Tailscale on and try again.")
+                                          .arg(line, config_.check.host.trimmed()));
+        return;
+    }
+    emitEvent(EventKind::Info, describeTailscale(status, config_.check.host));
+    beginChecks();
+}
+
+void Session::readTailscale() {
+    tailscale_ = factories_.tailscale ? factories_.tailscale(this) : nullptr;
+    if (!tailscale_) {
+        finish(Outcome::TimedOut, explainTimeout(observations_));
+        return;
+    }
+    connect(tailscale_, &TailscaleReader::finished, this, &Session::onTailscaleRead);
+    tailscale_->start();
+}
+
+void Session::concludeTimeout() {
+    observations_.elapsedMs = elapsedMs();
+    emitEvent(EventKind::Failure, QStringLiteral("Timed out after %1").arg(formatDuration(elapsedMs())));
+    if (tailscaleAnswered_) {
+        concluding_ = true;  // no more checks or resends; read Tailscale once more, then finish
+        if (resendTimer_) resendTimer_->stop();
+        readTailscale();
+        return;
+    }
+    finish(Outcome::TimedOut, explainTimeout(observations_));
 }
 
 void Session::cancel() {
@@ -110,6 +182,7 @@ void Session::onProbeFinished(const ProbeResult& result) {
     observations_.elapsedMs = elapsedMs();
 
     if (result.ready()) {
+        if (wakeSent_ && wakeClock_.isValid()) wakeToReadyMs_ = wakeClock_.elapsed();
         emitEvent(EventKind::Ready, QStringLiteral("%1 ready: %2 (after %3)")
                                         .arg(describe(config_.check), result.detail, formatDuration(elapsedMs())));
         launch();
@@ -140,9 +213,7 @@ void Session::scheduleNextCheck() {
     if (finished_) return;
     const int remaining = config_.overallTimeoutMs - elapsedMs();
     if (remaining <= 0) {
-        observations_.elapsedMs = elapsedMs();
-        emitEvent(EventKind::Failure, QStringLiteral("Timed out after %1").arg(formatDuration(elapsedMs())));
-        finish(Outcome::TimedOut, explainTimeout(observations_));
+        concludeTimeout();
         return;
     }
     const int wait = std::min(config_.pollIntervalMs, remaining);
@@ -190,7 +261,21 @@ void Session::onWakeFinished(bool allSent, const QString& summary) {
     wakeSent_ = true;
     observations_.wakeSent = true;
     observations_.wakeAt = now;
+    wakeClock_.start();
     emitEvent(EventKind::WakeSent, QStringLiteral("Wake request sent: %1").arg(summary));
+    if (config_.learned && config_.learned->entries > 0) {
+        emitEvent(EventKind::Info, describeLearnedTiming(*config_.learned));
+    }
+    if (config_.learned && config_.learned->entries > 0 && config_.learned->longerAfterMs > 0) {
+        longerTimer_ = new QTimer(this);
+        longerTimer_->setSingleShot(true);
+        connect(longerTimer_, &QTimer::timeout, this, [this] {
+            if (finished_ || concluding_ || state_ != SessionState::Waiting) return;
+            emitEvent(EventKind::Info, QStringLiteral("Taking longer than usual"));
+        });
+        const qint64 after = config_.learned->longerAfterMs;
+        longerTimer_->start(static_cast<int>(std::min<qint64>(after, std::numeric_limits<int>::max())));
+    }
     emitEvent(EventKind::Info, QStringLiteral("Waiting for %1 (up to %2)")
                                    .arg(describe(config_.check), formatDuration(config_.overallTimeoutMs)));
     setState(SessionState::Waiting);
@@ -200,13 +285,13 @@ void Session::onWakeFinished(bool allSent, const QString& summary) {
 
 void Session::scheduleResend() {
     // Measured from the end of the previous send, and never while one is in flight.
-    if (finished_ || !config_.wake || config_.resendIntervalMs <= 0) return;
+    if (finished_ || concluding_ || !config_.wake || config_.resendIntervalMs <= 0) return;
     if (state_ != SessionState::Waiting || waker_) return;
     if (!resendTimer_) {
         resendTimer_ = new QTimer(this);
         resendTimer_->setSingleShot(true);
         connect(resendTimer_, &QTimer::timeout, this, [this] {
-            if (finished_ || state_ != SessionState::Waiting || waker_) return;
+            if (finished_ || concluding_ || state_ != SessionState::Waiting || waker_) return;
             sendWake();
         });
     }
@@ -253,6 +338,7 @@ void Session::finish(Outcome outcome, const QString& summary) {
     if (finished_) return;
     finished_ = true;
     if (resendTimer_) resendTimer_->stop();
+    if (longerTimer_) longerTimer_->stop();
     const bool good = outcome == Outcome::ReadyWithoutWake || outcome == Outcome::ReadyAfterWake;
     setState(good ? SessionState::Done : SessionState::Failed);
     emit finished(outcome, summary);
