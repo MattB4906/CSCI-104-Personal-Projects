@@ -35,7 +35,9 @@ QString describe(const ClientConfig& client);  // "Moonlight, stream \"Desktop\"
 QString clientConfigError(const ClientConfig& client);
 
 struct Profile {
-    static constexpr int kSchemaVersion = 1;
+    // 2 (WakeDeck 1.2): wake.destinationMode and wake.resendSeconds. Version 1
+    // files load with their defaults ("address", 15 s).
+    static constexpr int kSchemaVersion = 2;
 
     QString name;
     QString notes;

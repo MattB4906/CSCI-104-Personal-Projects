@@ -118,6 +118,52 @@ private slots:
         QCOMPARE(profile->wake->target.interval.count(), 100);
     }
 
+    void version1ProfileGetsTheNewDefaults() {
+        QString error;
+        const auto profile = profileFromJson(
+            parse(R"({"schemaVersion": 1, "name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "192.168.1.255"}})"),
+            &error);
+        QVERIFY2(profile.has_value(), qPrintable(error));
+        QCOMPARE(profile->wake->destinationMode, WakeDestination::Address);
+        QCOMPARE(profile->wake->resendSeconds, 15);
+        QCOMPARE(profile->toSessionConfig().resendIntervalMs, 15000);
+        // Written back as version 2, with both new fields spelled out.
+        const QJsonObject json = toJson(*profile);
+        QCOMPARE(json.value(QStringLiteral("schemaVersion")).toInt(), 2);
+        QCOMPARE(json.value(QStringLiteral("wake")).toObject().value(QStringLiteral("destinationMode")).toString(), QStringLiteral("address"));
+        QCOMPARE(json.value(QStringLiteral("wake")).toObject().value(QStringLiteral("resendSeconds")).toInt(), 15);
+    }
+
+    void localNetworksAndResendRoundTrip() {
+        Profile original = fullProfile();
+        original.wake->destinationMode = WakeDestination::LocalNetworks;
+        original.wake->target.destination.clear();
+        original.wake->resendSeconds = 0;
+        QString error;
+        const auto restored = profileFromJson(toJson(original), &error);
+        QVERIFY2(restored.has_value(), qPrintable(error));
+        QCOMPARE(toJson(*restored), toJson(original));
+        QCOMPARE(restored->wake->destinationMode, WakeDestination::LocalNetworks);
+        QVERIFY(restored->wake->target.destination.empty());
+        QCOMPARE(restored->wake->resendSeconds, 0);
+        QCOMPARE(restored->toSessionConfig().resendIntervalMs, 0);
+        QCOMPARE(toJson(original).value(QStringLiteral("wake")).toObject().value(QStringLiteral("destination")).toString(), QString());
+
+        // The bounds: 0, 5 and 600 are accepted.
+        for (int seconds : {0, 5, 600}) {
+            QJsonObject json = toJson(fullProfile());
+            QJsonObject wake = json.value(QStringLiteral("wake")).toObject();
+            wake[QStringLiteral("resendSeconds")] = seconds;
+            json[QStringLiteral("wake")] = wake;
+            const auto bounded = profileFromJson(json, &error);
+            QVERIFY2(bounded.has_value(), qPrintable(error));
+            QCOMPARE(bounded->wake->resendSeconds, seconds);
+        }
+        QCOMPARE(describe(*restored->wake), QStringLiteral("9 packets to every local network of this Mac (ports 9 x3, 7 x3, 12 x3)"));
+        QCOMPARE(describeResend(*restored->wake), QStringLiteral("sent once"));
+        QCOMPARE(describeResend(*fullProfile().wake), QStringLiteral("again every 15 s while waiting"));
+    }
+
     void invalidJsonIsRejectedWithAReason_data() {
         QTest::addColumn<QByteArray>("json");
         QTest::addColumn<QString>("expectedWords");
@@ -139,8 +185,17 @@ private slots:
         QTest::newRow("bad preset") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "steam"}})") << QStringLiteral("preset");
         QTest::newRow("bad launch mode") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"launchMode": "fly"}})") << QStringLiteral("launchMode");
         QTest::newRow("arguments not list") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"arguments": "x"}})") << QStringLiteral("arguments");
-        QTest::newRow("newer schema") << QByteArray(R"({"schemaVersion": 2, "name": "X", "check": {"host": "h"}})") << QStringLiteral("newer");
+        QTest::newRow("newer schema") << QByteArray(R"({"schemaVersion": 3, "name": "X", "check": {"host": "h"}})") << QStringLiteral("newer");
         QTest::newRow("schema zero") << QByteArray(R"({"schemaVersion": 0, "name": "X", "check": {"host": "h"}})") << QStringLiteral("schemaVersion");
+        // Schema version 2: the destination mode and the resend interval.
+        QTest::newRow("bad destination mode") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "destinationMode": "everywhere"}})") << QStringLiteral("destinationMode");
+        QTest::newRow("local networks with a destination") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "destinationMode": "localNetworks"}})") << QStringLiteral("must be empty");
+        QTest::newRow("address mode without destination") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destinationMode": "address"}})") << QStringLiteral("destination");
+        QTest::newRow("resend below 5") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "resendSeconds": 4}})") << QStringLiteral("resendSeconds");
+        QTest::newRow("resend above 600") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "resendSeconds": 601}})") << QStringLiteral("resendSeconds");
+        QTest::newRow("resend negative") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "resendSeconds": -1}})") << QStringLiteral("resendSeconds");
+        QTest::newRow("resend as text") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "resendSeconds": "15"}})") << QStringLiteral("resendSeconds");
+        QTest::newRow("unknown wake field in version 2") << QByteArray(R"({"schemaVersion": 2, "name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "resendSecs": 15}})") << QStringLiteral("\"resendSecs\"");
         // Client rules, identical to the command line's.
         QTest::newRow("custom without path") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "custom"}})") << QStringLiteral("path");
         QTest::newRow("stream without app") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "client": {"preset": "moonlight", "launchMode": "stream"}})") << QStringLiteral("app");
@@ -230,6 +285,15 @@ private slots:
         QCOMPARE(profile->client.preset, ClientConfig::Preset::Moonlight);
         QCOMPARE(profile->client.appName, QStringLiteral("Desktop"));
         QVERIFY(profile->notes.contains(QStringLiteral("Fictional")));
+        QCOMPARE(profile->wake->destinationMode, WakeDestination::Address);
+        QCOMPARE(profile->wake->resendSeconds, 15);
+        // The shipped file is version 2 and spells out both new fields.
+        QFile file(QStringLiteral(WAKEDECK_EXAMPLES_DIR "/example-profile.json"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QJsonObject json = QJsonDocument::fromJson(file.readAll()).object();
+        QCOMPARE(json.value(QStringLiteral("schemaVersion")).toInt(), 2);
+        QVERIFY(json.value(QStringLiteral("wake")).toObject().contains(QStringLiteral("destinationMode")));
+        QVERIFY(json.value(QStringLiteral("wake")).toObject().contains(QStringLiteral("resendSeconds")));
     }
 
     // ---- The store ----
@@ -358,6 +422,103 @@ private slots:
         QVERIFY(file.open(QIODevice::ReadOnly));
         QCOMPARE(file.readAll(), content);
         QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.json.")).size(), 0);
+    }
+
+    void version3StoreIsRefusedAndLeftUntouched() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        const QByteArray content = R"({"schemaVersion": 3, "profiles": [{"name": "Future", "check": {"host": "h"}}]})";
+        QVERIFY(writeText(path, content));
+        const ProfileStore store(path);
+        const ProfileStore::LoadResult loaded = store.load();
+        QVERIFY(!loaded.ok);
+        QVERIFY2(loaded.error.contains(QStringLiteral("newer")), qPrintable(loaded.error));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), content);
+        QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.")).size(), 1);  // no backup, no copy
+    }
+
+    void version1StoreLoadsWithDefaults() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        QVERIFY(writeText(path, R"({"schemaVersion": 1, "profiles": [
+            {"schemaVersion": 1, "name": "Old PC", "check": {"host": "old-pc.example.net"},
+             "wake": {"method": "magicPacket", "mac": "00:00:5E:00:53:2A", "destination": "192.168.1.255", "ports": [9, 7], "repeat": 5, "intervalMs": 100}}
+        ]})"));
+        const ProfileStore::LoadResult loaded = ProfileStore(path).load();
+        QVERIFY2(loaded.ok, qPrintable(loaded.error));
+        QVERIFY2(loaded.warning.isEmpty(), qPrintable(loaded.warning));
+        QCOMPARE(loaded.profiles.size(), std::size_t(1));
+        QCOMPARE(loaded.profiles[0].wake->destinationMode, WakeDestination::Address);
+        QCOMPARE(loaded.profiles[0].wake->target.destination, std::string("192.168.1.255"));
+        QCOMPARE(loaded.profiles[0].wake->resendSeconds, 15);
+        QVERIFY(!QFile::exists(ProfileStore(path).v1BackupPath()));  // reading alone never writes
+    }
+
+    void version2RoundTripThroughTheStore() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        const ProfileStore store(path);
+        Profile local = fullProfile();
+        local.name = QStringLiteral("Local PC");
+        local.wake->destinationMode = WakeDestination::LocalNetworks;
+        local.wake->target.destination.clear();
+        local.wake->resendSeconds = 30;
+        QString error;
+        QVERIFY2(store.save({fullProfile(), local}, &error), qPrintable(error));
+        const ProfileStore::LoadResult loaded = store.load();
+        QVERIFY2(loaded.ok, qPrintable(loaded.error));
+        QCOMPARE(loaded.profiles.size(), std::size_t(2));
+        QCOMPARE(toJson(loaded.profiles[0]), toJson(fullProfile()));
+        QCOMPARE(toJson(loaded.profiles[1]), toJson(local));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+        QCOMPARE(root.value(QStringLiteral("schemaVersion")).toInt(), 2);
+        for (const QJsonValue& entry : root.value(QStringLiteral("profiles")).toArray()) {
+            QCOMPARE(entry.toObject().value(QStringLiteral("schemaVersion")).toInt(), 2);
+        }
+        QVERIFY(!QFile::exists(store.v1BackupPath()));  // a new store needs no backup
+    }
+
+    void version1StoreIsBackedUpOnceAndNeverOverwritten() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        const QByteArray original = R"({"schemaVersion": 1, "profiles": [{"name": "Old PC", "check": {"host": "old-pc.example.net"}}]})";
+        QVERIFY(writeText(path, original));
+        const ProfileStore store(path);
+        QCOMPARE(store.v1BackupPath(), dir.filePath(QStringLiteral("profiles.v1-backup.json")));
+
+        const ProfileStore::LoadResult loaded = store.load();
+        QVERIFY(loaded.ok);
+        QString error;
+        QVERIFY2(store.save(loaded.profiles, &error), qPrintable(error));
+        QFile backup(store.v1BackupPath());
+        QVERIFY(backup.open(QIODevice::ReadOnly));
+        QCOMPARE(backup.readAll(), original);  // the version 1 file, byte for byte
+        backup.close();
+
+        // Later saves replace a version 2 file: the backup stays as it was.
+        std::vector<Profile> more = loaded.profiles;
+        more.push_back(fullProfile());
+        QVERIFY2(store.save(more, &error), qPrintable(error));
+        // Even another version 1 file in its place never overwrites the first backup.
+        QVERIFY(writeText(path, R"({"schemaVersion": 1, "profiles": []})"));
+        QVERIFY2(store.save(more, &error), qPrintable(error));
+        QVERIFY(backup.open(QIODevice::ReadOnly));
+        QCOMPARE(backup.readAll(), original);
+        QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.")).size(), 2);  // the store and one backup
+    }
+
+    void storeWithoutSchemaVersionCountsAsVersion1() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        QVERIFY(writeText(path, R"({"profiles": []})"));
+        const ProfileStore store(path);
+        QString error;
+        QVERIFY2(store.save({fullProfile()}, &error), qPrintable(error));
+        QVERIFY(QFile::exists(store.v1BackupPath()));
     }
 
     void invalidEntriesAreSkippedWithACopyKept() {

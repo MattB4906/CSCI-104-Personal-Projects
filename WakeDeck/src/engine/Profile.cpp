@@ -99,7 +99,9 @@ std::optional<WakeConfig> wakeFromJson(const QJsonValue& value, QString* error) 
     }
     const QJsonObject object = value.toObject();
     const QString where = QStringLiteral("wake");
-    if (!onlyKnownFields(object, {"method", "mac", "destination", "ports", "repeat", "intervalMs"}, where, error)) {
+    if (!onlyKnownFields(object, {"method", "mac", "destination", "destinationMode", "ports", "repeat", "intervalMs",
+                                  "resendSeconds"},
+                         where, error)) {
         return std::nullopt;
     }
 
@@ -117,12 +119,27 @@ std::optional<WakeConfig> wakeFromJson(const QJsonValue& value, QString* error) 
         return std::nullopt;
     }
 
+    const auto modeText = stringField(object, "destinationMode", QStringLiteral("address"), where, error);
+    if (!modeText) return std::nullopt;
+    WakeDestination mode = WakeDestination::Address;
+    if (*modeText == QLatin1String("localNetworks")) {
+        mode = WakeDestination::LocalNetworks;
+    } else if (*modeText != QLatin1String("address")) {
+        *error = QStringLiteral("wake.destinationMode must be \"address\" or \"localNetworks\"");
+        return std::nullopt;
+    }
+
     WakeTarget target;
     const auto destination = stringField(object, "destination", QString(), where, error);
     if (!destination) return std::nullopt;
     target.destination = destination->trimmed().toStdString();
-    if (target.destination.empty()) {
+    if (mode == WakeDestination::Address && target.destination.empty()) {
         *error = QStringLiteral("wake.destination is required (an address or host name)");
+        return std::nullopt;
+    }
+    if (mode == WakeDestination::LocalNetworks && !target.destination.empty()) {
+        // Contradictory settings are reported, as with the client's rules.
+        *error = QStringLiteral("wake.destination must be empty when wake.destinationMode is \"localNetworks\"");
         return std::nullopt;
     }
     if (object.contains(QLatin1String("ports"))) {
@@ -147,7 +164,15 @@ std::optional<WakeConfig> wakeFromJson(const QJsonValue& value, QString* error) 
     const auto interval = intField(object, "intervalMs", 100, 0, 10000, where, error);
     if (!interval) return std::nullopt;
     target.interval = std::chrono::milliseconds(*interval);
-    return WakeConfig{*mac, target};
+    const auto resend = intField(object, "resendSeconds", WakeConfig::kDefaultResendSeconds, 0,
+                                 WakeConfig::kMaxResendSeconds, where, error);
+    if (!resend) return std::nullopt;
+    const QString resendProblem = resendSecondsError(*resend);
+    if (!resendProblem.isEmpty()) {
+        *error = QStringLiteral("wake.resendSeconds %1").arg(resendProblem);
+        return std::nullopt;
+    }
+    return WakeConfig{*mac, target, mode, *resend};
 }
 
 std::optional<ClientConfig> clientFromJson(const QJsonValue& value, QString* error) {
@@ -268,6 +293,7 @@ SessionConfig Profile::toSessionConfig() const {
     SessionConfig config;
     config.check = check;
     config.wake = wake;
+    config.resendIntervalMs = wake ? wake->resendSeconds * 1000 : 0;
     config.pollIntervalMs = pollIntervalMs;
     config.overallTimeoutMs = overallTimeoutMs;
     return config;
@@ -283,12 +309,16 @@ QJsonObject toJson(const Profile& profile) {
         QJsonObject wake;
         wake[QStringLiteral("method")] = QStringLiteral("magicPacket");
         wake[QStringLiteral("mac")] = QString::fromStdString(profile.wake->mac.toString());
-        wake[QStringLiteral("destination")] = QString::fromStdString(profile.wake->target.destination);
+        wake[QStringLiteral("destinationMode")] = destinationModeName(profile.wake->destinationMode);
+        wake[QStringLiteral("destination")] = profile.wake->destinationMode == WakeDestination::LocalNetworks
+                                                  ? QString()
+                                                  : QString::fromStdString(profile.wake->target.destination);
         QJsonArray ports;
         for (std::uint16_t port : profile.wake->target.ports) ports.append(static_cast<int>(port));
         wake[QStringLiteral("ports")] = ports;
         wake[QStringLiteral("repeat")] = static_cast<int>(profile.wake->target.repeat);
         wake[QStringLiteral("intervalMs")] = static_cast<int>(profile.wake->target.interval.count());
+        wake[QStringLiteral("resendSeconds")] = profile.wake->resendSeconds;
         json[QStringLiteral("wake")] = wake;
     } else {
         json[QStringLiteral("wake")] = QJsonValue::Null;

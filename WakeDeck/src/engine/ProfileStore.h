@@ -28,7 +28,12 @@ public:
 
     LoadResult load() const;
     // Writes atomically: the old file is replaced only once the new one is complete.
+    // WakeDeck 1.0 and 1.1 cannot read version 2, so the first save that replaces
+    // a version 1 file first copies it to v1BackupPath(), unless that exists already.
     bool save(const std::vector<Profile>& profiles, QString* error) const;
+
+    // "profiles.v1-backup.json" beside "profiles.json" (named after the store's file).
+    QString v1BackupPath() const;
 
     // One profile in a file of its own, for import and export.
     static std::optional<Profile> readProfileFile(const QString& path, QString* error);

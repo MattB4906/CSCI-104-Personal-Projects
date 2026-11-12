@@ -1,14 +1,16 @@
 {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "name": "Living Room PC (example)",
     "notes": "Fictional example. Replace every value with your own before using it. The MAC comes from the range reserved for documentation and the host name from a reserved example domain.",
     "wake": {
         "method": "magicPacket",
         "mac": "00:00:5E:00:53:2A",
+        "destinationMode": "address",
         "destination": "192.168.1.255",
         "ports": [9, 7],
         "repeat": 5,
-        "intervalMs": 100
+        "intervalMs": 100,
+        "resendSeconds": 15
     },
     "check": {
         "kind": "sunshine",

@@ -149,7 +149,33 @@ ProfileStore::LoadResult ProfileStore::load() const {
     return result;
 }
 
+QString ProfileStore::v1BackupPath() const {
+    const QFileInfo info(path_);
+    return info.dir().filePath(info.completeBaseName() + QStringLiteral(".v1-backup.json"));
+}
+
 bool ProfileStore::save(const std::vector<Profile>& profiles, QString* error) const {
+    if (QFile::exists(path_) && !QFile::exists(v1BackupPath())) {
+        // Is the file about to be replaced a version 1 store (or one from before
+        // the schema version existed)? Then keep it for WakeDeck 1.0 and 1.1.
+        QFile current(path_);
+        if (current.open(QIODevice::ReadOnly)) {
+            const QJsonDocument document = QJsonDocument::fromJson(current.readAll());
+            current.close();
+            const QJsonObject root = document.object();
+            const QJsonValue version = root.value(QLatin1String("schemaVersion"));
+            const bool isStore = document.isObject() && root.value(QLatin1String("profiles")).isArray();
+            const bool older = version.isUndefined() || (version.isDouble() && version.toDouble() < 2);
+            if (isStore && older && !QFile::copy(path_, v1BackupPath())) {
+                if (error) {
+                    *error = QStringLiteral("cannot keep a copy of the version 1 file %1 as %2, which WakeDeck 1.1 "
+                                            "and earlier need; nothing was saved")
+                                 .arg(path_, v1BackupPath());
+                }
+                return false;
+            }
+        }
+    }
     QJsonArray array;
     for (const Profile& profile : profiles) array.append(toJson(profile));
     QJsonObject root;
