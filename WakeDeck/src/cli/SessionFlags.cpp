@@ -10,7 +10,12 @@ namespace wakedeck::cli {
 const std::set<std::string>& sessionValueFlags() {
     static const std::set<std::string> flags = {"--check-host", "--check-port", "--check", "--probe-timeout-ms",
                                                "--poll-s", "--timeout-s", "--mac", "--to", "--ports", "--repeat",
-                                               "--interval-ms"};
+                                               "--interval-ms", "--resend-s"};
+    return flags;
+}
+
+const std::set<std::string>& sessionSwitchFlags() {
+    static const std::set<std::string> flags = {"--local-networks"};
     return flags;
 }
 
@@ -22,6 +27,9 @@ const std::set<std::string>& clientValueFlags() {
 bool hasCheckOrWakeFlags(const Flags& flags) {
     for (const std::string& flag : sessionValueFlags()) {
         if (flag == "--poll-s" || flag == "--timeout-s") continue;
+        if (flags.has(flag.c_str())) return true;
+    }
+    for (const std::string& flag : sessionSwitchFlags()) {
         if (flags.has(flag.c_str())) return true;
     }
     return false;
@@ -99,13 +107,18 @@ std::optional<SessionConfig> sessionConfigFromFlags(const Flags& flags, std::str
 
     const bool hasMac = flags.has("--mac");
     const bool hasTo = flags.has("--to");
-    if (hasMac != hasTo) {
-        error = "--mac and --to go together: give both or neither";
+    const bool localNetworks = flags.has("--local-networks");
+    if (hasTo && localNetworks) {
+        error = "give either --to or --local-networks, not both";
+        return std::nullopt;
+    }
+    if (hasMac != (hasTo || localNetworks)) {
+        error = "--mac goes together with --to or --local-networks: give both or neither";
         return std::nullopt;
     }
     if (!hasMac) {
-        if (flags.has("--ports") || flags.has("--repeat") || flags.has("--interval-ms")) {
-            error = "--ports, --repeat and --interval-ms need --mac and --to";
+        if (flags.has("--ports") || flags.has("--repeat") || flags.has("--interval-ms") || flags.has("--resend-s")) {
+            error = "--ports, --repeat, --interval-ms and --resend-s need --mac with --to or --local-networks";
             return std::nullopt;
         }
         return config;
@@ -117,10 +130,12 @@ std::optional<SessionConfig> sessionConfigFromFlags(const Flags& flags, std::str
         return std::nullopt;
     }
     WakeTarget wake;
-    wake.destination = QString::fromStdString(flags.valueOr("--to", "")).trimmed().toStdString();
-    if (wake.destination.empty()) {
-        error = "--to needs a host name or address";
-        return std::nullopt;
+    if (!localNetworks) {
+        wake.destination = QString::fromStdString(flags.valueOr("--to", "")).trimmed().toStdString();
+        if (wake.destination.empty()) {
+            error = "--to needs a host name or address";
+            return std::nullopt;
+        }
     }
     const auto ports = parsePortList(flags.valueOr("--ports", "9,7"));
     if (!ports) {
@@ -140,7 +155,14 @@ std::optional<SessionConfig> sessionConfigFromFlags(const Flags& flags, std::str
         return std::nullopt;
     }
     wake.interval = std::chrono::milliseconds(*interval);
-    config.wake = WakeConfig{*mac, wake};
+    const auto resend = parseUnsigned(flags.valueOr("--resend-s", "15"), 0, WakeConfig::kMaxResendSeconds);
+    if (!resend || !resendSecondsError(static_cast<int>(*resend)).isEmpty()) {
+        error = "--resend-s must be 0 (send once) or a whole number of seconds from 5 to 600";
+        return std::nullopt;
+    }
+    config.wake = WakeConfig{*mac, wake, localNetworks ? WakeDestination::LocalNetworks : WakeDestination::Address,
+                             static_cast<int>(*resend)};
+    config.resendIntervalMs = static_cast<int>(*resend) * 1000;
     return config;
 }
 

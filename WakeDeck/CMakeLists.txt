@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 1.1.0 LANGUAGES CXX)
+project(WakeDeck VERSION 1.2.0 LANGUAGES CXX)
 set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}")  # the one place the version is written
 
 # The release script sets CMAKE_OSX_DEPLOYMENT_TARGET to 13.0 and builds against
@@ -52,6 +52,8 @@ add_library(wakedeck_engine STATIC
   src/engine/ServiceProbe.cpp
   src/engine/QtWaker.h
   src/engine/QtWaker.cpp
+  src/engine/LocalNetworks.h
+  src/engine/LocalNetworks.cpp
   src/engine/Explain.h
   src/engine/Explain.cpp
   src/engine/Session.h

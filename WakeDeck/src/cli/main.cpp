@@ -25,6 +25,7 @@
 #include "core/UdpSender.h"
 #include "core/WakePlan.h"
 #include "core/WakeSender.h"
+#include "engine/LocalNetworks.h"
 
 namespace {
 
@@ -49,24 +50,27 @@ void printGeneralUsage(std::ostream& out) {
 
 void printWakeUsage(std::ostream& out) {
     out << "Usage:\n"
-        << "  wakedeck-cli wake --mac <address> --to <host> [--ports 9,7] [--repeat 5]\n"
+        << "  wakedeck-cli wake --mac <address> --to <host>|--local-networks [--ports 9,7] [--repeat 5]\n"
         << "                    [--interval-ms 100] [--dry-run]\n"
         << "\n"
         << "Options:\n"
         << "  --mac <address>    Target MAC: 00:00:5E:00:53:2A, 00-00-5E-00-53-2A or 00005E00532A\n"
         << "  --to <host>        Destination IPv4 address or host name, e.g. 192.168.1.255\n"
+        << "  --local-networks   Instead of --to: the broadcast address of every local network\n"
+        << "                     this Mac is on (IPv4, up, able to broadcast, not a VPN tunnel)\n"
         << "  --ports <list>     UDP ports, comma separated, used in this order (default 9,7)\n"
         << "  --repeat <n>       Packets per port, 1-100 (default 5)\n"
         << "  --interval-ms <n>  Pause between packets in milliseconds, 0-10000 (default 100)\n"
         << "  --dry-run          Show the plan and the packet bytes without sending\n"
         << "\n"
-        << "Exit codes: 0 all packets sent, 1 usage error, 2 destination not resolved,\n"
-        << "            3 socket error or some packets not sent.\n";
+        << "Exit codes: 0 all packets sent, 1 usage error, 2 destination not resolved or no\n"
+        << "            local network found, 3 socket error or some packets not sent.\n";
 }
 
 struct WakeOptions {
     std::string mac;
     std::string to;
+    bool localNetworks = false;
     std::string ports = "9,7";
     unsigned repeat = 5;
     unsigned intervalMs = 100;
@@ -124,6 +128,10 @@ std::optional<int> parseWakeArguments(const std::vector<std::string>& args, Wake
             options.dryRun = true;
             continue;
         }
+        if (flag == "--local-networks") {
+            options.localNetworks = true;
+            continue;
+        }
         const bool takesValue = flag == "--mac" || flag == "--to" || flag == "--ports" ||
                                 flag == "--repeat" || flag == "--interval-ms";
         if (!takesValue) return usageError("unknown option '" + flag + "'", printWakeUsage);
@@ -147,8 +155,76 @@ std::optional<int> parseWakeArguments(const std::vector<std::string>& args, Wake
         }
     }
     if (options.mac.empty()) return usageError("--mac is required", printWakeUsage);
-    if (options.to.empty()) return usageError("--to is required", printWakeUsage);
+    if (options.localNetworks && !options.to.empty()) {
+        return usageError("give either --to or --local-networks, not both", printWakeUsage);
+    }
+    if (options.to.empty() && !options.localNetworks) return usageError("--to or --local-networks is required", printWakeUsage);
     return std::nullopt;
+}
+
+// --local-networks: the same plan to the broadcast address of every local network.
+int runWakeLocalNetworks(const WakeOptions& options, const wakedeck::MacAddress& mac, const wakedeck::WakeTarget& target) {
+    const auto plan = wakedeck::expandWakePlan(target);
+    const wakedeck::MagicPacket packet(mac);
+    // Reading the interface list is a local system call; nothing goes on the network.
+    const QStringList addresses = wakedeck::localBroadcastAddresses();
+    std::cout << "Target MAC    " << mac.toString() << "\n"
+              << "Destination   every local network of this Mac\n"
+              << "Plan          " << describePlan(target, plan.size()) << " to each network\n";
+    for (const QString& address : addresses) std::cout << "Network       " << address.toStdString() << "\n";
+    if (addresses.isEmpty()) std::cout << "Network       none: this Mac is not connected to a local network that supports broadcast\n";
+
+    if (options.dryRun) {
+        std::cout << "\nDry run: no packet was sent. Only this Mac's list of network interfaces was read,\n"
+                  << "which is not network traffic.\n"
+                  << "Packet bytes (" << packet.size() << "):\n" << packet.toHex();
+        return 0;
+    }
+    if (addresses.isEmpty()) {
+        std::cerr << "error: this Mac is not connected to a local network that supports broadcast\n";
+        return 2;
+    }
+
+    wakedeck::UdpSender sender;
+    if (!sender.isOpen()) {
+        std::cerr << "error: cannot open a UDP socket: " << sender.openError() << "\n";
+        return 3;
+    }
+    unsigned sent = 0;
+    std::size_t attempts = 0;
+    std::vector<std::string> failures;
+    for (const QString& address : addresses) {
+        std::string error;
+        const auto destination = wakedeck::resolveIPv4(address.toStdString(), &error);  // numeric: no lookup
+        if (!destination) {
+            failures.push_back(address.toStdString() + ": " + error);
+            attempts += plan.size();
+            continue;
+        }
+        const auto report = wakedeck::sendWake(packet, *destination, plan, target.interval, sender);
+        sent += report.sent();
+        attempts += report.attempts.size();
+        for (const auto& attempt : report.attempts) {
+            if (attempt.error) {
+                failures.push_back(destination->dotted + ", port " + std::to_string(attempt.port) + ", attempt " +
+                                   std::to_string(attempt.attempt) + ": " + *attempt.error);
+            }
+        }
+    }
+    const std::string when = localClock();
+    const bool allSent = failures.empty() && sent == attempts && attempts > 0;
+    std::cout << "\n";
+    if (allSent) {
+        std::cout << "Wake request sent: " << sent << " packets left this computer for " << addresses.size()
+                  << (addresses.size() == 1 ? " local network" : " local networks") << " at " << when << ".\n";
+    } else {
+        std::cout << "Wake request incomplete: " << sent << " of " << attempts << " packets left this computer at " << when
+                  << ".\n";
+        for (const std::string& failure : failures) std::cout << "  " << failure << "\n";
+    }
+    std::cout << "This confirms the packets were sent, not that the computer is awake.\n"
+              << "Check the service you need (for example Sunshine) before connecting.\n";
+    return allSent ? 0 : 3;
 }
 
 int runWake(const std::vector<std::string>& args) {
@@ -165,6 +241,7 @@ int runWake(const std::vector<std::string>& args) {
     target.ports = *ports;
     target.repeat = options.repeat;
     target.interval = std::chrono::milliseconds(options.intervalMs);
+    if (options.localNetworks) return runWakeLocalNetworks(options, *mac, target);
 
     const auto plan = wakedeck::expandWakePlan(target);
     const wakedeck::MagicPacket packet(*mac);

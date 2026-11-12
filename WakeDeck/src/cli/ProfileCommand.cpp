@@ -46,7 +46,10 @@ void printProfile(const Profile& profile) {
               << "  check:  " << text(describe(profile.check)) << " (poll "
               << text(QString::number(profile.pollIntervalMs / 1000.0)) << " s, up to "
               << text(formatDuration(profile.overallTimeoutMs)) << ")\n"
-              << "  wake:   " << (profile.wake ? text(describe(*profile.wake)) : std::string("none configured")) << "\n"
+              << "  wake:   "
+              << (profile.wake ? text(describe(*profile.wake) + QStringLiteral(", ") + describeResend(*profile.wake))
+                               : std::string("none configured"))
+              << "\n"
               << "  client: " << text(describe(profile.client)) << "\n";
     if (!profile.notes.isEmpty()) std::cout << "  notes:  " << text(profile.notes) << "\n";
 }
@@ -154,7 +157,8 @@ void printProfileUsage(std::ostream& out) {
            "  wakedeck-cli profile show <name>\n"
            "  wakedeck-cli profile add --name <name> --check-host <host> [--check-port 47989] [--check sunshine|tcp]\n"
            "                           [--probe-timeout-ms 2000] [--poll-s 3] [--timeout-s 120]\n"
-           "                           [--mac <address> --to <host> [--ports 9,7] [--repeat 5] [--interval-ms 100]]\n"
+           "                           [--mac <address> --to <host>|--local-networks [--ports 9,7] [--repeat 5]\n"
+           "                            [--interval-ms 100] [--resend-s 15]]\n"
            "                           [--client none|moonlight|custom] [--client-path <path>]\n"
            "                           [--launch open|stream] [--app <name>] [--notes <text>] [--replace]\n"
            "  wakedeck-cli profile remove <name>\n"
@@ -174,7 +178,9 @@ int runProfile(const std::vector<std::string>& args) {
     valued.insert("--name");
     valued.insert("--notes");
     valued.insert("--store");
-    if (const auto error = parseFlags(args, valued, {"--replace"}, flags)) return usageError(*error, printProfileUsage);
+    std::set<std::string> switches = sessionSwitchFlags();
+    switches.insert("--replace");
+    if (const auto error = parseFlags(args, valued, switches, flags)) return usageError(*error, printProfileUsage);
     if (flags.help) {
         printProfileUsage(std::cout);
         return 0;

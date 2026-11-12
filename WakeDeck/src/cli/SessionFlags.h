@@ -15,12 +15,14 @@
 namespace wakedeck::cli {
 
 // --check-host, --check-port, --check, --probe-timeout-ms, --poll-s, --timeout-s,
-// --mac, --to, --ports, --repeat, --interval-ms
+// --mac, --to, --ports, --repeat, --interval-ms, --resend-s
 const std::set<std::string>& sessionValueFlags();
+// --local-networks (the alternative to --to)
+const std::set<std::string>& sessionSwitchFlags();
 // --client, --client-path, --launch, --app, --client-args
 const std::set<std::string>& clientValueFlags();
 
-// True when any session flag other than --poll-s and --timeout-s is present.
+// True when any session flag or switch other than --poll-s and --timeout-s is present.
 bool hasCheckOrWakeFlags(const Flags& flags);
 // True when any client flag is present.
 bool hasClientFlags(const Flags& flags);

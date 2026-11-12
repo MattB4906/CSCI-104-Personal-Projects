@@ -37,14 +37,18 @@ void printConnectUsage(std::ostream& out) {
     out << "Usage:\n"
            "  wakedeck-cli connect --check-host <host> [--check-port 47989] [--check sunshine|tcp]\n"
            "                       [--probe-timeout-ms 2000] [--poll-s 3] [--timeout-s 120]\n"
-           "                       [--mac <address> --to <host> [--ports 9,7] [--repeat 5] [--interval-ms 100]]\n"
+           "                       [--mac <address> --to <host>|--local-networks [--ports 9,7] [--repeat 5]\n"
+           "                        [--interval-ms 100] [--resend-s 15]]\n"
            "                       [--client none|moonlight|custom] [--client-path <path>] [--launch open|stream]\n"
            "                       [--app <name>] [--client-args \"<arguments>\"]\n"
            "  wakedeck-cli connect --profile <name> [--store <file>] [--poll-s 3] [--timeout-s 120]\n"
            "\n"
            "Checks the service. If it is not ready and a wake is configured, sends the wake request,\n"
            "then keeps checking until the service answers or --timeout-s runs out, and finally opens\n"
-           "the client. Without a wake it only waits; without a client it stops at \"ready\". With\n"
+           "the client. While it waits it sends the wake request again every --resend-s seconds\n"
+           "(0: only once; otherwise 5-600, default 15). --local-networks sends it to the broadcast\n"
+           "address of every local network this Mac is on instead of to --to, reading the list again\n"
+           "for every send. Without a wake it only waits; without a client it stops at \"ready\". With\n"
            "--profile the settings come from a saved profile (see `profile --help`); only --poll-s and\n"
            "--timeout-s may be given alongside it. --client-args is split on spaces; client paths must\n"
            "be absolute.\n"
@@ -94,7 +98,7 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
     known.insert(clientValueFlags().begin(), clientValueFlags().end());
     known.insert("--profile");
     known.insert("--store");
-    if (const auto error = parseFlags(args, known, {}, flags)) return usageError(*error, printConnectUsage);
+    if (const auto error = parseFlags(args, known, sessionSwitchFlags(), flags)) return usageError(*error, printConnectUsage);
     if (flags.help) {
         printConnectUsage(std::cout);
         return 0;
