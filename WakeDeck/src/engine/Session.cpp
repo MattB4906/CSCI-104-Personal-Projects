@@ -237,6 +237,9 @@ void Session::onWakeFinished(bool allSent, const QString& summary) {
     if (finished_) return;
 
     const bool resend = wakeSent_;  // the first request already went out
+    // A resend still in flight when the wait ended (the service answered, or the
+    // run timed out) no longer matters: no line, no count.
+    if (resend && (state_ != SessionState::Waiting || concluding_)) return;
     if (!allSent) {
         if (resend) {
             // The first request did leave this Mac; a failed repeat does not end the run.

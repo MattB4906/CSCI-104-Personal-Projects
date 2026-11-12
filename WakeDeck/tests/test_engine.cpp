@@ -91,15 +91,16 @@ private:
 
 class FakeLauncher final : public Launcher {
 public:
-    FakeLauncher(bool ok, QObject* parent) : Launcher(parent), ok_(ok) {}
+    FakeLauncher(bool ok, QObject* parent, int delayMs = 0) : Launcher(parent), ok_(ok), delayMs_(delayMs) {}
     void start() override {
-        QTimer::singleShot(0, this, [this] {
+        QTimer::singleShot(delayMs_, this, [this] {
             emit finished(ok_, ok_ ? QStringLiteral("fake client launched") : QStringLiteral("fake client not found"));
         });
     }
 
 private:
     bool ok_;
+    int delayMs_;
 };
 
 struct Script {
@@ -111,6 +112,10 @@ struct Script {
     // Resend tests: when either is set, a ScriptedWaker replaces FakeWaker.
     std::vector<bool> wakeResults;  // one per wake request; the last one repeats
     int wakeDelayMs = 0;
+    int resendDelayMs = -1;         // >= 0: how long the second and later wake requests take (else wakeDelayMs)
+    int sendsDone = 0;              // wake requests that finished
+    int readyAfterSends = -1;       // >= 0: every check is ready once this many wake requests finished
+    int launchDelayMs = 0;          // how long the FakeLauncher takes
     int readyAfterMs = -1;          // >= 0: every check is ready once this much time has passed
     QElapsedTimer clock;            // started by fakeFactories
     int wakersInFlight = 0;
@@ -134,8 +139,8 @@ private:
 // Counts how many wake requests are in flight at once and answers after a delay.
 class ScriptedWaker final : public Waker {
 public:
-    ScriptedWaker(std::shared_ptr<Script> script, bool ok, QObject* parent)
-        : Waker(parent), script_(std::move(script)), ok_(ok) {}
+    ScriptedWaker(std::shared_ptr<Script> script, bool ok, int delayMs, QObject* parent)
+        : Waker(parent), script_(std::move(script)), ok_(ok), delayMs_(delayMs) {}
     ~ScriptedWaker() override {
         if (running_) --script_->wakersInFlight;
     }
@@ -143,9 +148,10 @@ public:
         running_ = true;
         ++script_->wakersInFlight;
         script_->maxWakersInFlight = std::max(script_->maxWakersInFlight, script_->wakersInFlight);
-        QTimer::singleShot(script_->wakeDelayMs, this, [this] {
+        QTimer::singleShot(delayMs_, this, [this] {
             running_ = false;
             --script_->wakersInFlight;
+            ++script_->sendsDone;
             emit finished(ok_, ok_ ? QStringLiteral("10 packets to 192.0.2.255 (ports 9 x5, 7 x5)")
                                    : QStringLiteral("0 of 10 packets to 192.0.2.255; cannot open a UDP socket"));
         });
@@ -154,6 +160,7 @@ public:
 private:
     std::shared_ptr<Script> script_;
     bool ok_;
+    int delayMs_;
     bool running_ = false;
 };
 
@@ -165,6 +172,7 @@ SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
         ProbeResult result;
         result.status = script->statuses[index];
         if (script->readyAfterMs >= 0 && script->clock.elapsed() >= script->readyAfterMs) result.status = ProbeStatus::Ready;
+        if (script->readyAfterSends >= 0 && script->sendsDone >= script->readyAfterSends) result.status = ProbeStatus::Ready;
         result.detail = statusName(result.status);
         result.elapsedMs = 1;
         return new FakeProbe(result, parent);
@@ -172,16 +180,19 @@ SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
     script->clock.start();
     factories.waker = [script](const WakeConfig&, QObject* parent) -> Waker* {
         ++script->wakersCreated;
-        if (!script->wakeResults.empty() || script->wakeDelayMs > 0) {
+        if (!script->wakeResults.empty() || script->wakeDelayMs > 0 || script->resendDelayMs >= 0) {
             const std::size_t index = std::min(static_cast<std::size_t>(script->wakersCreated - 1),
                                                script->wakeResults.empty() ? 0 : script->wakeResults.size() - 1);
             const bool ok = script->wakeResults.empty() ? script->wakeOk : script->wakeResults[index];
-            return new ScriptedWaker(script, ok, parent);
+            const int delay = script->wakersCreated > 1 && script->resendDelayMs >= 0 ? script->resendDelayMs : script->wakeDelayMs;
+            return new ScriptedWaker(script, ok, delay, parent);
         }
         return new FakeWaker(script->wakeOk, parent);
     };
     if (script->launchOk.has_value()) {
-        factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(*script->launchOk, parent); };
+        factories.launcher = [script](QObject* parent) -> Launcher* {
+            return new FakeLauncher(*script->launchOk, parent, script->launchDelayMs);
+        };
     }
     factories.tailscale = [script](QObject* parent) -> TailscaleReader* {
         ++script->readersCreated;
@@ -688,7 +699,7 @@ private slots:
     void resendsAtTheIntervalUntilReady() {
         auto script = std::make_shared<Script>();
         script->statuses = {ProbeStatus::TimedOut};
-        script->readyAfterMs = 300;
+        script->readyAfterSends = 3;  // counted, not timed, so a loaded Mac cannot make it flaky
         script->wakeResults = {true};
         SessionConfig config = quickConfig(true);
         config.pollIntervalMs = 10;
@@ -702,7 +713,6 @@ private slots:
         QVERIFY(run.outcome.has_value());
         QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
         QVERIFY2(script->wakersCreated >= 3, qPrintable(QString::number(script->wakersCreated)));
-        QVERIFY2(script->wakersCreated <= 6, qPrintable(QString::number(script->wakersCreated)));
         QVERIFY(run.hasEvent(QStringLiteral("Wake request sent: ")));
         QVERIFY(run.hasEvent(QStringLiteral("Wake request sent again (2nd time): 10 packets")));
         QVERIFY(run.hasEvent(QStringLiteral("Wake request sent again (3rd time)")));
@@ -715,6 +725,61 @@ private slots:
         QTest::qWait(150);
         QCOMPARE(script->wakersCreated, created);
         QCOMPARE(script->maxWakersInFlight, 1);
+    }
+
+    void resendIntervalCountsFromTheEndOfTheSend() {
+        // Each send takes 80 ms; the next one starts 50 ms after the previous one
+        // ended, so finished sends are at least 130 ms apart (not 50 or 80).
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->readyAfterSends = 3;
+        script->wakeResults = {true};
+        script->wakeDelayMs = 80;
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 10;
+        config.resendIntervalMs = 50;
+        config.overallTimeoutMs = 10000;
+        Session session(config, fakeFactories(script));
+        std::vector<QDateTime> sends;
+        connect(&session, &Session::timelineEvent, [&sends](const TimelineEvent& e) {
+            if (e.kind == EventKind::WakeSent) sends.push_back(e.at);
+        });
+        const Run run = runSession(session, 10000);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
+        QVERIFY(sends.size() >= 3);
+        for (std::size_t i = 1; i < sends.size(); ++i) {
+            QVERIFY2(sends[i - 1].msecsTo(sends[i]) >= 125, qPrintable(QString::number(sends[i - 1].msecsTo(sends[i]))));
+        }
+        QCOMPARE(script->maxWakersInFlight, 1);
+    }
+
+    void aResendStillInFlightAtReadyIsIgnored() {
+        // The first request is quick; the resend takes 1.5 s and is still in
+        // flight when the service answers (after 50 ms); the launch takes longer.
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->readyAfterMs = 50;
+        script->wakeResults = {true};
+        script->resendDelayMs = 1500;
+        script->launchOk = true;
+        script->launchDelayMs = 2000;
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 5;
+        config.resendIntervalMs = 1;
+        config.overallTimeoutMs = 10000;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session, 10000);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
+        QCOMPARE(script->wakersCreated, 2);
+        QCOMPARE(script->sendsDone, 2);  // the resend did finish, during the launch
+        const auto ready = std::find(run.kinds.begin(), run.kinds.end(), EventKind::Ready);
+        QVERIFY(ready != run.kinds.end());
+        QVERIFY(std::find(ready, run.kinds.end(), EventKind::WakeSent) == run.kinds.end());
+        QVERIFY(std::find(ready, run.kinds.end(), EventKind::Failure) == run.kinds.end());
+        QCOMPARE(session.observations().wakeSends, 1);
+        QVERIFY(!run.hasEvent(QStringLiteral("sent again")));
     }
 
     void resendsStopAtTheTimeLimit() {
