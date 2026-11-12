@@ -16,6 +16,7 @@
 #include <optional>
 #include <sys/types.h>
 
+#include "agent_bundle.h"
 #include "engine/AppLocator.h"
 #include "engine/ClientLauncher.h"
 #include "engine/ProcessWatcher.h"
@@ -49,33 +50,11 @@ QString makeFakeBundle(const QDir& dir) {
     return app;
 }
 
-// A background-only bundle around the fake agent (tests/fake_agent.mm): a real
-// AppKit process, so the system reports it as a running application, but with
-// no window, no Dock icon and no menu bar. It ends by itself after 8 seconds.
-QString makeAgentBundle(const QDir& dir) {
-    const QString app = dir.filePath(QStringLiteral("WakeDeckFakeAgent.app"));
-    QDir().mkpath(app + QStringLiteral("/Contents/MacOS"));
-    QFile plist(app + QStringLiteral("/Contents/Info.plist"));
-    if (!plist.open(QIODevice::WriteOnly)) return QString();
-    plist.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-                "<plist version=\"1.0\"><dict>\n"
-                "<key>CFBundleExecutable</key><string>WakeDeckFakeAgent</string>\n"
-                "<key>CFBundleIdentifier</key><string>net.example.wakedeck.fake-agent</string>\n"
-                "<key>CFBundlePackageType</key><string>APPL</string>\n"
-                "<key>LSBackgroundOnly</key><true/>\n"
-                "</dict></plist>\n");
-    plist.close();
-    const QString executable = app + QStringLiteral("/Contents/MacOS/WakeDeckFakeAgent");
-    if (!QFile::copy(QStringLiteral(WAKEDECK_FAKE_AGENT), executable)) return QString();
-    QFile::setPermissions(executable, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
-    return app;
-}
-
 struct LaunchOutcome {
     std::optional<bool> ok;
     QString summary;
-    qint64 pid = 0;  // launchedPid() when finished arrived
+    qint64 pid = 0;         // launchedPid() when finished arrived
+    qint64 runningPid = 0;  // runningPid() then
 };
 
 LaunchOutcome runLauncher(const ClientConfig& client, const QString& host, int timeoutMs = 5000) {
@@ -86,6 +65,7 @@ LaunchOutcome runLauncher(const ClientConfig& client, const QString& host, int t
         outcome.ok = ok;
         outcome.summary = summary;
         outcome.pid = launcher.launchedPid();
+        outcome.runningPid = launcher.runningPid();
     });
     launcher.start();
     [[maybe_unused]] const bool finished = QTest::qWaitFor([&outcome] { return outcome.ok.has_value(); }, timeoutMs);
@@ -289,7 +269,7 @@ private slots:
         const QString app = makeFakeBundle(QDir(dir.path()));
         bool called = false;
         auto* context = new QObject;
-        platform::openApplication(app, context, [&called](bool, const QString&, qint64) { called = true; });
+        platform::openApplication(app, context, [&called](bool, const QString&, qint64, bool) { called = true; });
         delete context;  // gone before the system answers
         QTest::qWait(1500);
         QVERIFY(!called);
@@ -302,19 +282,22 @@ private slots:
         QVERIFY2(*outcome.ok, qPrintable(outcome.summary));
         QVERIFY2(outcome.summary.contains(QStringLiteral("Launched custom client true 127.0.0.1")), qPrintable(outcome.summary));
         QVERIFY2(outcome.pid > 0, "a directly started client must report its process id");
+        QCOMPARE(outcome.runningPid, outcome.pid);
         QVERIFY(outcome.summary.contains(QStringLiteral("(process %1)").arg(outcome.pid)));
     }
 
     void openReportsANewProcessButNotARunningOne() {
         // The first open starts the agent, so its process is reported and can be
-        // watched; a second open only activates the running copy, which belongs
-        // to whoever started it and must not be claimed.
+        // watched; a second open only activates the running copy: it started no
+        // process, but it names the running one, so the caller can recognise a
+        // copy it started itself.
         QTemporaryDir dir;
         const QString app = makeAgentBundle(QDir(dir.path()));
         QVERIFY(!app.isEmpty());
         const LaunchOutcome first = runLauncher(customClient(app), QStringLiteral("h"), 15000);
         QVERIFY2(first.ok.has_value() && *first.ok, qPrintable(first.summary));
         QVERIFY2(first.pid > 0, "the process started by the open must be reported");
+        QCOMPARE(first.runningPid, first.pid);
         QVERIFY(!processGone(first.pid));
 
         const LaunchOutcome second = runLauncher(customClient(app), QStringLiteral("h"), 15000);
@@ -327,6 +310,7 @@ private slots:
         QVERIFY(stillRunning);
         QVERIFY2(second.ok.has_value() && *second.ok, qPrintable(second.summary));
         QCOMPARE(second.pid, qint64(0));
+        QCOMPARE(second.runningPid, first.pid);
         QVERIFY(watching);
         QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
         QCOMPARE(spy.at(0).at(0).toLongLong(), first.pid);
@@ -472,6 +456,7 @@ private slots:
         QVERIFY2(events.filter(QStringLiteral("Launching custom client true 127.0.0.1")).size() == 1, qPrintable(events.join(QLatin1Char('|'))));
         QVERIFY(events.filter(QStringLiteral("Launched custom client")).size() == 1);
         QVERIFY(session.launchedPid() > 0);
+        QCOMPARE(session.runningPid(), session.launchedPid());
         QCOMPARE(session.launchedClient(), QStringLiteral("custom client true 127.0.0.1"));
     }
 
@@ -506,6 +491,7 @@ private slots:
         QCOMPARE(*outcome, Outcome::LaunchFailed);
         QVERIFY2(summary.contains(QStringLiteral("not found")), qPrintable(summary));
         QCOMPARE(session.launchedPid(), qint64(0));
+        QCOMPARE(session.runningPid(), qint64(0));
         QVERIFY(session.launchedClient().isEmpty());
     }
 };

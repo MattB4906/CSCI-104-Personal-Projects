@@ -150,6 +150,8 @@ add_test(NAME test_launcher COMMAND test_launcher)
 add_executable(test_gui tests/test_gui.cpp)
 qt_add_resources(test_gui "wakedeck_examples_test" PREFIX "/examples" BASE "examples" FILES examples/example-profile.json)
 target_link_libraries(test_gui PRIVATE wakedeck_ui Qt6::Test)
+add_dependencies(test_gui wakedeck_fake_agent)
+target_compile_definitions(test_gui PRIVATE WAKEDECK_FAKE_AGENT="$<TARGET_FILE:wakedeck_fake_agent>")
 add_test(NAME test_gui COMMAND test_gui)
 set_tests_properties(test_gui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

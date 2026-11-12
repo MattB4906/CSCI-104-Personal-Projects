@@ -48,14 +48,14 @@ std::optional<QString> bundleExecutable(const QString& appPath) {
 }
 
 void openApplication(const QString& appPath, QObject* context,
-                     std::function<void(bool ok, const QString& error, qint64 pid)> done) {
+                     std::function<void(bool ok, const QString& error, qint64 pid, bool alreadyRunning)> done) {
     @autoreleasepool {
         NSURL* url = [NSURL fileURLWithPath:appPath.toNSString()];
         NSWorkspaceOpenConfiguration* configuration = [NSWorkspaceOpenConfiguration configuration];
         configuration.activates = YES;
 
         // Asked before the open: if a copy is already running, the open only
-        // activates it, and that process belongs to the user, not to WakeDeck.
+        // activates it and starts no process.
         const bool wasRunning = isAlreadyRunning(url);
 
         // The completion handler runs on a system thread. Hop back to the Qt
@@ -69,15 +69,15 @@ void openApplication(const QString& appPath, QObject* context,
                                               const bool ok = application != nil && error == nil;
                                               const QString message =
                                                   error != nil ? QString::fromNSString(error.localizedDescription) : QString();
-                                              const qint64 pid = (ok && !wasRunning && application.processIdentifier > 0)
+                                              const qint64 pid = (ok && application.processIdentifier > 0)
                                                                      ? static_cast<qint64>(application.processIdentifier)
                                                                      : 0;
                                               QObject* receiver = QCoreApplication::instance();
                                               if (receiver == nullptr) return;  // the application is shutting down
                                               QMetaObject::invokeMethod(
                                                   receiver,
-                                                  [guard, done, ok, message, pid] {
-                                                      if (guard) done(ok, message, pid);
+                                                  [guard, done, ok, message, pid, wasRunning] {
+                                                      if (guard) done(ok, message, pid, wasRunning);
                                                   },
                                                   Qt::QueuedConnection);
                                           }];

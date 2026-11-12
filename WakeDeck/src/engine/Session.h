@@ -48,10 +48,12 @@ public:
     virtual void start() = 0;
     virtual bool configured() const { return true; }      // false: nothing will be launched
     virtual QString describe() const { return QStringLiteral("the client"); }
-    // The process this launcher itself started, valid once finished(true, ...)
-    // has been emitted; 0 when none or unknown, for example when the system only
-    // brought an already-running copy of the client to the front.
+    // Valid once finished(true, ...) has been emitted; 0 when none or unknown.
+    // launchedPid: the process this launcher itself started; 0 when the system
+    // only brought an already-running copy of the client to the front.
+    // runningPid: the client's process either way, also that already-running copy.
     virtual qint64 launchedPid() const { return 0; }
+    virtual qint64 runningPid() const { return launchedPid(); }
 
 signals:
     void finished(bool ok, const QString& summary);
@@ -86,9 +88,10 @@ public:
 
     SessionState state() const { return state_; }
     const Observations& observations() const { return observations_; }
-    // After a successful launch: the client's process id as its launcher reported
-    // it (0: none or unknown) and the launcher's description of the client.
+    // After a successful launch: the client's process ids as its launcher reported
+    // them (0: none or unknown, see Launcher) and its description of the client.
     qint64 launchedPid() const { return launchedPid_; }
+    qint64 runningPid() const { return runningPid_; }
     QString launchedClient() const { return launchedClient_; }
 
 signals:
@@ -118,6 +121,7 @@ private:
     bool wakeSent_ = false;
     bool finished_ = false;
     qint64 launchedPid_ = 0;
+    qint64 runningPid_ = 0;
     QString launchedClient_;
     Probe* probe_ = nullptr;
     Waker* waker_ = nullptr;

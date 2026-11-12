@@ -464,7 +464,7 @@ void MainWindow::setRunning(bool running) {
 }
 
 void MainWindow::beginStep(const Profile& profile) {
-    stopWatchingClient();  // a new step: the previous client is no longer this window's business
+    stopWatchingClient();  // a new step: the previous client no longer quits WakeDeck
     runProfileName_ = profile.name;
     resetRunDisplay();
     stepInFlight_ = true;
@@ -502,7 +502,7 @@ void MainWindow::appendTimeline(const TimelineEvent& event) {
 void MainWindow::startWakeAndConnect() {
     const Profile* profile = currentProfile();
     if (!profile || isRunning()) return;
-    stopWatchingClient();  // a new run: the previous client is no longer this window's business
+    stopWatchingClient();  // a new run: the previous client no longer quits WakeDeck
     runProfileName_ = profile->name;
     resetRunDisplay();
     serviceStatus_->setText(QStringLiteral("checking…"));
@@ -538,9 +538,11 @@ void MainWindow::onSessionState(SessionState state) {
 
 void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
     qint64 launchedPid = 0;
+    qint64 runningPid = 0;
     QString launchedClient;
     if (session_) {
         launchedPid = session_->launchedPid();
+        runningPid = session_->runningPid();
         launchedClient = session_->launchedClient();
         session_->deleteLater();
         session_ = nullptr;
@@ -550,7 +552,7 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
     case Outcome::ReadyWithoutWake:
     case Outcome::ReadyAfterWake:
         serviceStatus_->setText(serviceStatus_->text() + QStringLiteral(". %1").arg(summary));
-        if (!launchedClient.isEmpty()) watchClient(launchedPid, launchedClient);
+        if (!launchedClient.isEmpty()) watchClient(launchedPid, runningPid, launchedClient);
         break;
     case Outcome::TimedOut:
         serviceStatus_->setText(QStringLiteral("not ready: timed out"));
@@ -646,7 +648,7 @@ void MainWindow::startOpenClient() {
         event.kind = ok ? EventKind::Info : EventKind::Failure;
         event.text = summary;
         appendTimeline(event);
-        if (ok) watchClient(launcher->launchedPid(), launcher->describe());
+        if (ok) watchClient(launcher->launchedPid(), launcher->runningPid(), launcher->describe());
         endStep();
         if (!ok) {
             const Profile* profile = runProfile();
@@ -667,10 +669,14 @@ void MainWindow::setQuitWhenClientCloses(bool on) {
 }
 
 bool MainWindow::isWatchingClient() const {
-    return clientWatcher_->isWatching();
+    return quitArmed_ && clientWatcher_->isWatching();
 }
 
 qint64 MainWindow::watchedClientPid() const {
+    return isWatchingClient() ? clientWatcher_->pid() : 0;
+}
+
+qint64 MainWindow::ownedClientPid() const {
     return clientWatcher_->pid();
 }
 
@@ -683,33 +689,55 @@ void MainWindow::onQuitOptionToggled(bool on) {
     }
 }
 
-void MainWindow::watchClient(qint64 pid, const QString& client) {
+void MainWindow::watchClient(qint64 launchedPid, qint64 runningPid, const QString& client) {
     stopWatchingClient();
+    qint64 pid = 0;
+    bool reused = false;
+    if (launchedPid > 0) {
+        // A process WakeDeck started: from now on it is the one WakeDeck owns,
+        // whether or not the option is on.
+        if (!clientWatcher_->watch(launchedPid)) {
+            if (quitWhenClientCloses()) {
+                note(QStringLiteral("Could not watch %1 (process %2); WakeDeck stays open when it closes")
+                         .arg(client)
+                         .arg(launchedPid));
+            }
+            return;
+        }
+        pid = launchedPid;
+    } else if (runningPid > 0 && runningPid == clientWatcher_->pid()) {
+        // The system brought a copy to the front that WakeDeck started earlier and
+        // that has been running ever since: still WakeDeck's own.
+        pid = runningPid;
+        reused = true;
+    }
     if (!quitWhenClientCloses()) return;
     if (pid <= 0) {
-        // Only a process WakeDeck started itself is watched; when the system just
-        // brought an already-running copy to the front, it belongs to the user.
-        note(QStringLiteral("Not watching %1: no process of its own was started (it may have been running already), "
+        // Only a process WakeDeck started itself is watched; a copy the user had
+        // opened, which the system just brought to the front, is left alone.
+        note(QStringLiteral("Not watching %1: WakeDeck did not start the running copy (it was open already), "
                             "so WakeDeck stays open")
                  .arg(client));
         return;
     }
-    if (!clientWatcher_->watch(pid)) {
-        note(QStringLiteral("Could not watch %1 (process %2); WakeDeck stays open when it closes").arg(client).arg(pid));
-        return;
-    }
+    quitArmed_ = true;
     watchedClient_ = client;
-    note(QStringLiteral("Watching %1 (process %2) — WakeDeck will quit when it closes").arg(client).arg(pid));
+    note(QStringLiteral("Watching %1 (process %2%3) — WakeDeck will quit when it closes")
+             .arg(client)
+             .arg(pid)
+             .arg(reused ? QStringLiteral(", opened by WakeDeck earlier") : QString()));
 }
 
 void MainWindow::stopWatchingClient() {
-    clientWatcher_->stop();
+    // Ends the promise to quit, not the ownership: the process stays followed.
+    quitArmed_ = false;
     watchedClient_.clear();
 }
 
 void MainWindow::onClientExited(qint64 pid) {
+    if (!quitArmed_) return;  // a client WakeDeck owned closed while not watched: nothing to do
     const QString client = watchedClient_;
-    watchedClient_.clear();
+    stopWatchingClient();
     note(QStringLiteral("%1 closed (process %2); quitting WakeDeck").arg(client).arg(pid));
     if (quitHook_) quitHook_();
 }

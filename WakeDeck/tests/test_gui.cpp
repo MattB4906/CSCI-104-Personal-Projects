@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QProcess>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTemporaryDir>
@@ -18,13 +19,16 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <functional>
 #include <sys/types.h>
 #include <memory>
 #include <optional>
 #include <vector>
 
+#include "agent_bundle.h"
 #include "app/MainWindow.h"
 #include "app/ProfileEditorDialog.h"
+#include "engine/ClientLauncher.h"
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
 #include "engine/Session.h"
@@ -63,9 +67,13 @@ private:
 
 class FakeLauncher final : public Launcher {
 public:
-    FakeLauncher(bool ok, qint64 pid, QObject* parent) : Launcher(parent), ok_(ok), pid_(pid) {}
+    // Reports its process ids even when it fails, so the tests show that a
+    // failed launch is never watched.
+    FakeLauncher(bool ok, qint64 pid, qint64 runningPid, QObject* parent)
+        : Launcher(parent), ok_(ok), pid_(pid), runningPid_(runningPid) {}
     QString describe() const override { return QStringLiteral("fake client"); }
-    qint64 launchedPid() const override { return ok_ ? pid_ : 0; }
+    qint64 launchedPid() const override { return pid_; }
+    qint64 runningPid() const override { return runningPid_ > 0 ? runningPid_ : pid_; }
     void start() override {
         QTimer::singleShot(0, this, [this] {
             emit finished(ok_, ok_ ? QStringLiteral("Launched fake client") : QStringLiteral("the client /nonexistent was not found"));
@@ -75,6 +83,7 @@ public:
 private:
     bool ok_;
     qint64 pid_;
+    qint64 runningPid_;
 };
 
 struct Script {
@@ -82,7 +91,8 @@ struct Script {
     bool launchOk = true;
     bool wakeOk = true;
     int probeDelayMs = 0;
-    qint64 launchPid = 0;  // what the fake launcher reports as the client's process
+    qint64 launchPid = 0;   // what the fake launcher reports as the process it started
+    qint64 runningPid = 0;  // the running copy it found, when it started none (0: same as launchPid)
     int probesCreated = 0;
     int wakersCreated = 0;
 };
@@ -105,7 +115,7 @@ MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
         if (profile.client.preset == ClientConfig::Preset::None) {
             factories.launcher = [](QObject* parent) -> Launcher* { return new NoLauncher(parent); };
         } else {
-            factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(script->launchOk, script->launchPid, parent); };
+            factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(script->launchOk, script->launchPid, script->runningPid, parent); };
         }
         return factories;
     };
@@ -594,6 +604,254 @@ private slots:
         QTest::qWait(300);
         QCOMPARE(quits, 0);  // the first client's exit is no longer WakeDeck's business
         QTRY_COMPARE_WITH_TIMEOUT(quits, 1, 6000);
+    }
+
+    void aClientWakeDeckOpenedIsWatchedAgain() {
+        // Open mode: the first run starts the client, which stays open after the
+        // stream; the next run and Open client only bring it to the front. It is
+        // still the copy WakeDeck started, so it is watched again each time.
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        const qint64 own = startSleeper(2);
+        QVERIFY(own > 0);
+        script->launchPid = own;
+        MainWindow window(store, fakeFactories(script));
+        window.setQuitWhenClientCloses(true);
+        int quits = 0;
+        window.setQuitHook([&quits] { ++quits; });
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(window.watchedClientPid(), own);
+
+        script->launchPid = 0;
+        script->runningPid = own;
+        outcome.reset();
+        window.startWakeAndConnect();
+        QVERIFY(QTest::qWaitFor([&outcome] { return outcome.has_value(); }, 5000));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QCOMPARE(window.watchedClientPid(), own);
+        QVERIFY2(window.timelineTexts().filter(QStringLiteral("opened by WakeDeck earlier) — WakeDeck will quit when it closes")).size() == 1,
+                 qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
+
+        QSignalSpy step(&window, &MainWindow::stepFinished);
+        window.startOpenClient();
+        QVERIFY(!window.isWatchingClient());
+        QTRY_COMPARE_WITH_TIMEOUT(step.count(), 1, 5000);
+        QCOMPARE(window.watchedClientPid(), own);
+
+        QCOMPARE(quits, 0);
+        QTRY_COMPARE_WITH_TIMEOUT(quits, 1, 5000);
+        QCOMPARE(window.ownedClientPid(), qint64(0));
+    }
+
+    void aClientWakeDeckDidNotStartIsNeverWatched() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        const qint64 users = startSleeper(4);  // a copy the user opened
+        const qint64 own = startSleeper(2);
+        QVERIFY(users > 0 && own > 0);
+        MainWindow window(store, fakeFactories(script));
+        window.setQuitWhenClientCloses(true);
+        int quits = 0;
+        window.setQuitHook([&quits] { ++quits; });
+        auto run = [&window] {
+            std::optional<Outcome> outcome;
+            QObject::connect(&window, &MainWindow::runFinished, &window, [&outcome](Outcome o) { outcome = o; },
+                             Qt::SingleShotConnection);
+            window.startWakeAndConnect();
+            return QTest::qWaitFor([&outcome] { return outcome.has_value(); }, 5000) && *outcome == Outcome::ReadyWithoutWake;
+        };
+
+        // Already running before WakeDeck ever started a client.
+        script->runningPid = users;
+        QVERIFY(run());
+        QVERIFY(!window.isWatchingClient());
+        QCOMPARE(window.ownedClientPid(), qint64(0));
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("Not watching fake client: WakeDeck did not start")).size() == 1);
+
+        // WakeDeck starts one; a later run finds the user's copy instead.
+        script->launchPid = own;
+        script->runningPid = 0;
+        QVERIFY(run());
+        QCOMPARE(window.watchedClientPid(), own);
+        script->launchPid = 0;
+        script->runningPid = users;
+        QVERIFY(run());
+        QVERIFY(!window.isWatchingClient());
+        QCOMPARE(window.ownedClientPid(), own);  // still followed, but no longer quits WakeDeck
+
+        // Once WakeDeck's copy has ended, its old process id means nothing.
+        QVERIFY(QTest::qWaitFor([own] { return processGone(own); }, 5000));
+        QTRY_COMPARE_WITH_TIMEOUT(window.ownedClientPid(), qint64(0), 2000);
+        QCOMPARE(quits, 0);
+        script->runningPid = own;
+        QVERIFY(run());
+        QVERIFY(!window.isWatchingClient());
+
+        QVERIFY(QTest::qWaitFor([users] { return processGone(users); }, 7000));
+        QTest::qWait(300);
+        QCOMPARE(quits, 0);
+    }
+
+    void openedClientIsWatchedAgainEndToEnd() {
+        // The real launcher and the real open path, with the windowless fake
+        // agent as the client: the first run opens it and watches it; the second
+        // only brings it to the front and watches it again, because WakeDeck
+        // started it; when it ends, the quit hook runs.
+        QTemporaryDir dir;
+        const QString app = makeAgentBundle(QDir(dir.path()));
+        QVERIFY(!app.isEmpty());
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), false, true);
+        profile.client.path = app;  // a custom bundle without arguments is opened
+        QVERIFY(store.save({profile}, nullptr));
+        auto script = std::make_shared<Script>();
+        const MainWindow::FactoriesFor fakes = fakeFactories(script);
+        MainWindow window(store, [fakes](const Profile& p) {
+            SessionFactories factories = fakes(p);
+            factories.launcher = makeLauncherFactory(p.client, p.check.host);
+            return factories;
+        });
+        window.setQuitWhenClientCloses(true);
+        int quits = 0;
+        window.setQuitHook([&quits] { ++quits; });
+
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome, 15000));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        const qint64 agent = window.watchedClientPid();
+        QVERIFY2(agent > 0, qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
+        const auto endAgent = qScopeGuard([agent] { ::kill(static_cast<pid_t>(agent), SIGTERM); });
+
+        outcome.reset();
+        window.startWakeAndConnect();
+        QVERIFY(QTest::qWaitFor([&outcome] { return outcome.has_value(); }, 15000));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QCOMPARE(window.watchedClientPid(), agent);
+        QVERIFY2(window.timelineTexts().filter(QStringLiteral("opened by WakeDeck earlier")).size() == 1,
+                 qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
+        QCOMPARE(quits, 0);
+
+        ::kill(static_cast<pid_t>(agent), SIGTERM);
+        QTRY_COMPARE_WITH_TIMEOUT(quits, 1, 5000);
+    }
+
+    void ownershipIsKeptWhileTheOptionIsOff() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        const qint64 own = startSleeper(2);
+        QVERIFY(own > 0);
+        script->launchPid = own;
+        MainWindow window(store, fakeFactories(script));
+        window.setQuitWhenClientCloses(false);
+        int quits = 0;
+        window.setQuitHook([&quits] { ++quits; });
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QVERIFY(!window.isWatchingClient());
+        QCOMPARE(window.ownedClientPid(), own);
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("atching")).isEmpty());
+
+        window.setQuitWhenClientCloses(true);
+        script->launchPid = 0;
+        script->runningPid = own;
+        outcome.reset();
+        window.startWakeAndConnect();
+        QVERIFY(QTest::qWaitFor([&outcome] { return outcome.has_value(); }, 5000));
+        QCOMPARE(window.watchedClientPid(), own);
+        QTRY_COMPARE_WITH_TIMEOUT(quits, 1, 5000);
+    }
+
+    void singleStepsStopTheWatch() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        MainWindow window(store, fakeFactories(script));
+        window.setQuitWhenClientCloses(true);
+        int quits = 0;
+        window.setQuitHook([&quits] { ++quits; });
+        QSignalSpy steps(&window, &MainWindow::stepFinished);
+        const std::vector<std::function<void()>> stepActions = {
+            [&window] { window.startCheckOnly(); },
+            [&window] { window.startWakeOnly(); },
+            [&window] { window.startOpenClient(); },  // finds no process of its own below
+        };
+        std::vector<qint64> clients;
+        for (std::size_t i = 0; i < stepActions.size(); ++i) {
+            const qint64 pid = startSleeper(2);
+            QVERIFY(pid > 0);
+            clients.push_back(pid);
+            script->launchPid = pid;
+            std::optional<Outcome> outcome;
+            QObject::connect(&window, &MainWindow::runFinished, &window, [&outcome](Outcome o) { outcome = o; },
+                             Qt::SingleShotConnection);
+            window.startWakeAndConnect();
+            QVERIFY(QTest::qWaitFor([&outcome] { return outcome.has_value(); }, 5000));
+            QCOMPARE(window.watchedClientPid(), pid);
+
+            script->launchPid = 0;
+            stepActions[i]();
+            QVERIFY2(!window.isWatchingClient(), qPrintable(QStringLiteral("step %1").arg(i)));
+            QTRY_COMPARE_WITH_TIMEOUT(steps.count(), static_cast<int>(i + 1), 5000);
+            QVERIFY2(!window.isWatchingClient(), qPrintable(QStringLiteral("step %1").arg(i)));
+        }
+        for (const qint64 pid : clients) QVERIFY(QTest::qWaitFor([pid] { return processGone(pid); }, 5000));
+        QTest::qWait(300);
+        QCOMPARE(quits, 0);
+    }
+
+    void failedRunsStartNoWatch() {
+        const qint64 pid = startSleeper(1);  // what every launcher below reports, even failing
+        QVERIFY(pid > 0);
+        int quits = 0;
+        struct Case {
+            Outcome expected;
+            std::vector<ProbeStatus> statuses;
+            bool launchOk;
+            int overallTimeoutMs;
+            bool cancel;
+        };
+        const std::vector<Case> cases = {
+            {Outcome::TimedOut, {ProbeStatus::TimedOut}, true, 60, false},
+            {Outcome::LaunchFailed, {ProbeStatus::Ready}, false, 2000, false},
+            {Outcome::Cancelled, {ProbeStatus::TimedOut}, true, 10000, true},
+        };
+        for (const Case& c : cases) {
+            QTemporaryDir dir;
+            const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+            Profile profile = sampleProfile(QStringLiteral("PC"), true, true);
+            profile.overallTimeoutMs = c.overallTimeoutMs;
+            QVERIFY(store.save({profile}, nullptr));
+            auto script = std::make_shared<Script>();
+            script->statuses = c.statuses;
+            script->launchOk = c.launchOk;
+            script->launchPid = pid;
+            MainWindow window(store, fakeFactories(script));
+            window.setQuitWhenClientCloses(true);
+            window.setQuitHook([&quits] { ++quits; });
+            std::optional<Outcome> outcome;
+            window.startWakeAndConnect();
+            if (c.cancel) QTimer::singleShot(30, &window, [&window] { window.cancelRun(); });
+            QVERIFY(waitForRun(window, outcome));
+            QCOMPARE(*outcome, c.expected);
+            QVERIFY(!window.isWatchingClient());
+            QCOMPARE(window.ownedClientPid(), qint64(0));
+            QVERIFY2(window.timelineTexts().filter(QStringLiteral("atching")).isEmpty(),
+                     qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
+        }
+        QVERIFY(QTest::qWaitFor([pid] { return processGone(pid); }, 5000));
+        QTest::qWait(300);
+        QCOMPARE(quits, 0);
     }
 
     // ---- Editor ----

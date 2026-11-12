@@ -181,6 +181,7 @@ void Session::onLaunchFinished(bool ok, const QString& summary) {
     if (launcher_) {
         if (ok && !finished_ && launcher_->configured()) {
             launchedPid_ = launcher_->launchedPid();
+            runningPid_ = launcher_->runningPid();
             launchedClient_ = launcher_->describe();
         }
         launcher_->deleteLater();

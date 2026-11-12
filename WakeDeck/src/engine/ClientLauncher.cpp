@@ -154,8 +154,12 @@ void ClientLauncher::start() {
     }
     const LaunchPlan plan = *resolution.plan;
     if (plan.openBundle) {
-        platform::openApplication(plan.program, this, [this, plan](bool ok, const QString& error, qint64 pid) {
-            if (ok) pid_ = pid;
+        platform::openApplication(plan.program, this, [this, plan](bool ok, const QString& error, qint64 pid,
+                                                                   bool alreadyRunning) {
+            if (ok) {
+                pid_ = pid;
+                alreadyRunning_ = alreadyRunning;
+            }
             finish(ok, ok ? QStringLiteral("Opened %1").arg(plan.description)
                           : QStringLiteral("could not open %1: %2").arg(plan.program, error));
         });

@@ -51,8 +51,9 @@ public:
     static constexpr const char* kQuitWhenClientClosesKey = "quitWhenClientCloses";
     bool quitWhenClientCloses() const;
     void setQuitWhenClientCloses(bool on);
-    bool isWatchingClient() const;
+    bool isWatchingClient() const;    // WakeDeck will quit when the watched client closes
     qint64 watchedClientPid() const;  // 0 when not watching
+    qint64 ownedClientPid() const;    // the live client process WakeDeck itself started, or 0
 
     // State, for tests and scripting.
     const std::vector<Profile>& profiles() const { return profiles_; }
@@ -103,7 +104,7 @@ private:
     void onSessionEvent(const TimelineEvent& event);
     void onSessionState(SessionState state);
     void onSessionFinished(Outcome outcome, const QString& summary);
-    void watchClient(qint64 pid, const QString& client);  // after a successful launch
+    void watchClient(qint64 launchedPid, qint64 runningPid, const QString& client);  // after a successful launch
     void stopWatchingClient();
     void onClientExited(qint64 pid);
     void onQuitOptionToggled(bool on);
@@ -127,7 +128,10 @@ private:
     bool stepInFlight_ = false;   // a single check, wake or open is in progress
     QString runProfileName_;      // which computer the displayed run belongs to
     QString pendingWarnings_;     // load warnings to show once the window is visible
-    ProcessWatcher* clientWatcher_ = nullptr;  // watches the client WakeDeck launched, at most one
+    // Follows the client process WakeDeck itself started last, for as long as it
+    // lives, so that a later launch that only finds it running can watch it again.
+    ProcessWatcher* clientWatcher_ = nullptr;
+    bool quitArmed_ = false;      // its exit quits WakeDeck (option on, no newer run or step)
     QString watchedClient_;       // its description, for the timeline
     QuitHook quitHook_;
     QAction* quitWhenClientClosesAction_ = nullptr;
