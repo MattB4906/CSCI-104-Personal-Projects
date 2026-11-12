@@ -19,8 +19,11 @@ std::optional<QString> bundleExecutable(const QString& appPath);
 
 // Opens, or activates if already running, an application bundle without
 // arguments. Asynchronous: `done` is delivered later on `context`'s thread,
-// and skipped if `context` has been deleted meanwhile.
+// and skipped if `context` has been deleted meanwhile. `pid` is the process the
+// open started, or 0 when a copy of the application (same bundle identifier or
+// same bundle) was already running before the call, so that the system only
+// brought the user's own copy to the front, or when it is unknown.
 void openApplication(const QString& appPath, QObject* context,
-                     std::function<void(bool ok, const QString& error)> done);
+                     std::function<void(bool ok, const QString& error, qint64 pid)> done);
 
 }  // namespace wakedeck::platform

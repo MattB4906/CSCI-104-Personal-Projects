@@ -42,12 +42,16 @@ public:
     bool configured() const override { return client_.preset != ClientConfig::Preset::None; }
     QString describe() const override;
     void start() override;
+    // The executable's process id when it was run directly; for an opened
+    // bundle the new process, or 0 when a copy was already running.
+    qint64 launchedPid() const override { return pid_; }
 
 private:
     void finish(bool ok, const QString& summary);
 
     ClientConfig client_;
     QString host_;
+    qint64 pid_ = 0;
     bool done_ = false;
 };
 

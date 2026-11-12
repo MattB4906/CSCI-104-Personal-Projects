@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 1.0.0 LANGUAGES CXX)
+project(WakeDeck VERSION 1.1.0 LANGUAGES CXX)
 set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}")  # the one place the version is written
 
 # The release script sets CMAKE_OSX_DEPLOYMENT_TARGET to 13.0 and builds against
@@ -63,6 +63,8 @@ add_library(wakedeck_engine STATIC
   src/engine/AppLocator.h
   src/engine/ClientLauncher.h
   src/engine/ClientLauncher.cpp
+  src/engine/ProcessWatcher.h
+  src/engine/ProcessWatcher.cpp
   src/mac/AppLocator.mm)
 set_source_files_properties(src/mac/AppLocator.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_link_libraries(wakedeck_engine PUBLIC wakedeck_core Qt6::Core Qt6::Network "-framework AppKit")
@@ -133,8 +135,16 @@ target_link_libraries(test_profiles PRIVATE wakedeck_engine Qt6::Test)
 target_compile_definitions(test_profiles PRIVATE WAKEDECK_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
 add_test(NAME test_profiles COMMAND test_profiles)
 
+# A windowless AppKit process that test_launcher wraps in a background-only
+# bundle, so the open path can be tried without any visible application.
+add_executable(wakedeck_fake_agent tests/fake_agent.mm)
+set_source_files_properties(tests/fake_agent.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_link_libraries(wakedeck_fake_agent PRIVATE "-framework AppKit")
+
 add_executable(test_launcher tests/test_launcher.cpp)
 target_link_libraries(test_launcher PRIVATE wakedeck_engine Qt6::Test)
+add_dependencies(test_launcher wakedeck_fake_agent)
+target_compile_definitions(test_launcher PRIVATE WAKEDECK_FAKE_AGENT="$<TARGET_FILE:wakedeck_fake_agent>")
 add_test(NAME test_launcher COMMAND test_launcher)
 
 add_executable(test_gui tests/test_gui.cpp)

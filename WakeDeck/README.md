@@ -2,13 +2,13 @@
 
 WakeDeck wakes a sleeping computer with a Wake-on-LAN "magic packet", waits until the service you need on it is actually ready, and then opens your client, for example Moonlight for a PC that runs Sunshine. It is written in C++17 with Qt 6 for macOS.
 
-**Status: version 1.0.0, all six milestones complete.** WakeDeck is a signed, notarized Mac app: a list of your computers, one **Wake & Connect** button, and a timeline that keeps "wake request sent" and "service ready" apart. A command-line tool ships inside the app for scripts. See [Install](#install) to use it and [Current Scope](#current-scope) for what it does not do.
+**Status: version 1.1.0, the six milestones of 1.0.0 plus Quit When Client Closes.** WakeDeck is a signed, notarized Mac app: a list of your computers, one **Wake & Connect** button, and a timeline that keeps "wake request sent" and "service ready" apart. When the client it opened closes, for example because the PC went to sleep and Moonlight's stream ended, WakeDeck quits too, unless you turn that off. A command-line tool ships inside the app for scripts. See [Install](#install) to use it and [Current Scope](#current-scope) for what it does not do.
 
 ## Install
 
 Requirements: a Mac with Apple Silicon running macOS 13 Ventura or later.
 
-1. Download `WakeDeck-1.0.0.dmg` from this repository's Releases page and open it.
+1. Download the newest disk image, `WakeDeck-<version>.dmg`, from this repository's Releases page and open it.
 2. Drag **WakeDeck** onto **Applications**.
 3. Open WakeDeck from Applications. It is signed with a Developer ID and notarized by Apple, so it opens like any other downloaded app, with the usual one-time question about opening an app from the internet.
 4. Click **Add…** and describe your computer, or choose **File ▸ Load Example** to see a complete, fictional one first. The first time WakeDeck checks a computer on your own network, macOS may ask whether it may find devices on your local network; allow it, or wake requests and checks on the local network cannot work.
@@ -46,6 +46,10 @@ Anyone can add their own computers in the app: how to wake each one, which addre
 
 - **A real Mac app.** A signed and notarized disk image with its own icon, built against Qt's official binaries so it runs on macOS 13 and later, with the Qt frameworks and the command-line tool inside the bundle.
 
+### New in version 1.1.0
+
+- **Quit When Client Closes.** A checkable item in the **Run** menu, on by default and remembered between launches. When a Wake & Connect run or **Open client** has started the client, the timeline says "Watching Moonlight … — WakeDeck will quit when it closes", and when that process ends, for example because the PC went to sleep and Moonlight closed with the stream, WakeDeck adds a last line and quits. Only a process WakeDeck started itself is watched: a client you had already opened yourself is left alone and WakeDeck stays open. A new run or step ends the watch, and so does turning the option off. The exit is reported by the kernel (a kqueue process event), so WakeDeck never polls and the window never blocks. The command-line tool is unchanged.
+
 ## How It Works
 
 A magic packet is a UDP datagram of 102 bytes: six `0xFF` bytes followed by the target's MAC address repeated sixteen times. A sleeping PC has no working IP address. Its network card watches the wire for that pattern and powers the machine on, so the packet must arrive on the PC's own network segment, which normally means a broadcast on that LAN.
@@ -60,6 +64,8 @@ Once the PC is up, a VPN such as Tailscale gives it a stable address from anywhe
 First time: open WakeDeck and click **Add…**. Give the computer a name. In **Wake**, enter its MAC address and the address the wake request should be sent to, usually the broadcast address of its network; the ports and counts default to 9 and 7, five packets each. In **Check**, choose Sunshine or a TCP port and enter the computer's Tailscale name or address. In **Connect**, choose Moonlight and either "Open Moonlight" or "Start streaming an app" with the app's name as Moonlight shows it, for example Desktop. The three Test buttons tell you at once whether the packets left, whether the service answers right now, and whether the client was found. Click OK. The profile is saved in `~/Library/Application Support/WakeDeck/profiles.json`.
 
 Every day: select the computer and click **Wake & Connect**, or double-click it. If the service is already ready, the client opens within a second and the timeline says no wake was needed. If the computer is asleep, the timeline shows the check, the wake request with its time, the checks that follow, the moment the service answered, and the launch. If nothing answers in the configured time, the **What happened** box says exactly what was observed and what that usually means.
+
+When you are done: put the PC to sleep or close the client. With **Run ▸ Quit When Client Closes** checked, the default, WakeDeck quits as soon as the client it opened has closed, so nothing is left running on your Mac. Uncheck it to keep WakeDeck open; the choice is remembered.
 
 ### Wake & Connect, step by step
 
@@ -86,11 +92,14 @@ A typical run as the timeline shows it, with placeholder values:
 22:41:48  Sunshine at gaming-pc.example.net:47989 ready: hostname LIVING-ROOM-PC, state free (after 0:43)
 22:41:48  Launching Moonlight, stream "Desktop" on gaming-pc.example.net
 22:41:48  Launched Moonlight, stream "Desktop" on gaming-pc.example.net (process 48213)
+22:41:48  Watching Moonlight, stream "Desktop" on gaming-pc.example.net (process 48213) — WakeDeck will quit when it closes
 ```
 
 ### Opening the client
 
 Moonlight has two launch modes. **Open** asks the system to open the application bundle, or to bring it to the front if it is already running, exactly as a double click in Finder would. **Stream** runs Moonlight's own executable with `stream <host> <app>`, Moonlight's command-line form, so the stream starts without any clicking; the executable is run directly because arguments handed to an already-running application are not delivered to it. A **custom** client is an absolute path to an executable or a .app bundle plus optional arguments; a bundle without arguments is opened, anything with arguments is run, and `{host}` in an argument becomes the computer's address. The host used is the one the service check used, so the client connects to the same address that just answered. Moonlight is found through Launch Services by its bundle identifier, then in /Applications and ~/Applications, or at the path saved in the profile.
+
+For **Quit When Client Closes**, the launcher reports which process it started. An executable that WakeDeck runs, in stream mode or as a custom client, is that process. An opened bundle is the process the system started for it, unless a copy with the same bundle identifier was already running before WakeDeck asked: then the system only brought your own copy to the front, no process is reported, and WakeDeck stays open when it closes.
 
 ### Saved profiles
 
@@ -126,9 +135,10 @@ A few rules protect the file. It is written atomically, so a crash while saving 
 | `src/engine/Profile.h/.cpp` | `Profile` and `ClientConfig`, the saved-computer value types; `toJson` and `profileFromJson` with full validation; `clientConfigError`, the one set of client rules; name helpers. |
 | `src/engine/ProfileStore.h/.cpp` | Reads and writes the profiles file atomically, with the schema version, recovery of unreadable files and single-profile import and export. |
 | `src/engine/AppLocator.h`, `src/mac/AppLocator.mm` | The platform interface and its macOS implementation in Objective-C++: Launch Services, `NSBundle`, `NSWorkspace`. The only file that speaks to AppKit. |
-| `src/engine/ClientLauncher.h/.cpp` | `resolveLaunch`, which turns a `ClientConfig` and a host into the exact program and arguments or an explanation of what was searched; `ClientLauncher`, the `Launcher` that runs it. |
+| `src/engine/ClientLauncher.h/.cpp` | `resolveLaunch`, which turns a `ClientConfig` and a host into the exact program and arguments or an explanation of what was searched; `ClientLauncher`, the `Launcher` that runs it and reports the process it started. |
+| `src/engine/ProcessWatcher.h/.cpp` | `ProcessWatcher`: reports on the event loop when one process exits, through a kqueue (`EVFILT_PROC`, `NOTE_EXIT`) whose descriptor a `QSocketNotifier` watches; a process already gone is reported too. Owns and closes the kqueue. |
 | `src/app/main.cpp` | Creates the application and the window. |
-| `src/app/MainWindow.h/.cpp` | The window: the list of computers, the details pane, the run controls, the two facts, the timeline and the "What happened" box; menus for import, export, the example and help. Takes the factories for a run as a parameter, so tests drive it with fakes. |
+| `src/app/MainWindow.h/.cpp` | The window: the list of computers, the details pane, the run controls, the two facts, the timeline and the "What happened" box; menus for import, export, the example, help and **Quit When Client Closes**, which it keeps in `QSettings` and carries out with a `ProcessWatcher`. Takes the factories for a run as a parameter, and the quit as a replaceable hook, so tests drive it with fakes. |
 | `src/app/ProfileEditorDialog.h/.cpp` | The add/edit dialog with the Wake, Check and Connect groups, their Test buttons and the same validation as the file format. |
 | `src/cli/main.cpp` | Command dispatch and the synchronous `wake` command. |
 | `src/cli/Flags.h/.cpp` | The small option parser shared by every command: values, switches, positional words, help anywhere. |
@@ -137,6 +147,7 @@ A few rules protect the file. It is written atomically, so a crash while saving 
 | `examples/example-profile.json` | A complete fictional profile; bundled into the app for **Load Example**, and importable from the command line. |
 | `tests/check.h`, `tests/test_core.cpp`, `tests/test_loopback.cpp` | Framework-free unit tests of the core and the loopback socket test (Milestone 1). |
 | `tests/test_engine.cpp`, `tests/test_profiles.cpp`, `tests/test_launcher.cpp` | Qt Test suites for the engine, the profiles and the launcher. |
+| `tests/fake_agent.mm` | A windowless AppKit process that `test_launcher` wraps in a background-only bundle to try the open path and the process watcher. |
 | `tests/test_gui.cpp` | Qt Test suite for the window and the editor on the offscreen platform, with fake probes, wakers and launchers and a temporary profiles folder. |
 | `tests/cli_test.sh` | Runs the built tool through usage errors, `--dry-run`, the `profile` command on a temporary store, `launch` with harmless clients, and `check`/`connect` on loopback ports. |
 | `packaging/Info.plist.in` | The app's Info.plist: identifier, version, icon, minimum macOS, the local-network explanation. |
@@ -210,11 +221,11 @@ Exit codes. `wake`: 0 all packets sent, 1 usage error, 2 destination not resolve
 - `test_loopback` (25 checks): a UDP listener on `127.0.0.1` receives three packets from the real `UdpSender` and checks every byte; then descriptor creation is blocked for a moment to check that a sender which cannot open its socket says so.
 - `test_engine` (28 test functions, Qt Test): Sunshine reply parsing; the TCP and Sunshine probes against servers on `127.0.0.1`, including a fake Sunshine, a wrong service, an HTTP error and a silent server; the waker over loopback; the session with scripted fakes through every outcome; the explanation text, durations and the Tailscale heuristic.
 - `test_profiles` (Qt Test): the JSON round trip, defaults, 32 invalid inputs each rejected by field name, the shipped example, and the store's save, load and recovery paths in a temporary folder.
-- `test_launcher` (20 test functions, Qt Test): Launch Services lookups, a fake `.app` bundle in a temporary folder, `resolveLaunch` for every client kind including relative paths, launches of `/usr/bin/true` and of the fake bundle's script, the fake bundle opened through the system, a completion skipped for a deleted caller, and the session's launch step. No window ever appears.
-- `test_gui` (19 test functions, Qt Test, offscreen platform): the window with an empty store, with saved computers, adding, removing and reloading, **Load Example** from the bundled resource, a corrupt store kept as a warning for the user, a failed save leaving list and memory in step; **Wake & Connect** clicked for real on a laid-out window with fake probes, wakers and launchers through ready-at-once, wake-then-ready, timeout with the **What happened** box, a failed wake request, a missing client with **Locate client…** offered while the ready fact stays, cancel, **Check now** and **Wake only**, a single step blocking every other action, and a finished run cleared when another computer is selected; and the editor: a full profile round trip, the validation messages step by step, and the Moonlight streaming rule. Nothing is drawn on any screen and no real profiles file is touched.
+- `test_launcher` (24 test functions, Qt Test): Launch Services lookups, a fake `.app` bundle in a temporary folder, `resolveLaunch` for every client kind including relative paths, launches of `/usr/bin/true` with its process id reported and of the fake bundle's script, the fake bundle opened through the system, a completion skipped for a deleted caller, and the session's launch step; a background-only fake agent opened through the system, whose new process is reported and watched until it ends, while a second open of the running copy reports none; and the process watcher on `/bin/sleep 1`, on a process already gone, and stopped or destroyed before the exit. No window ever appears.
+- `test_gui` (25 test functions, Qt Test, offscreen platform): the window with an empty store, with saved computers, adding, removing and reloading, **Load Example** from the bundled resource, a corrupt store kept as a warning for the user, a failed save leaving list and memory in step; **Wake & Connect** clicked for real on a laid-out window with fake probes, wakers and launchers through ready-at-once, wake-then-ready, timeout with the **What happened** box, a failed wake request, a missing client with **Locate client…** offered while the ready fact stays, cancel, **Check now** and **Wake only**, a single step blocking every other action, and a finished run cleared when another computer is selected; **Quit When Client Closes** in the Run menu, on by default and remembered, with a fake launcher reporting a `/bin/sleep` process: the watching line and the quit hook called when the process ends, after Wake & Connect and after **Open client**, never with the option off or after it is turned off, and a new run replacing the previous watch; and the editor: a full profile round trip, the validation messages step by step, and the Moonlight streaming rule. Nothing is drawn on any screen, the test runner is never quit, and no real profiles file or preference is touched: settings go to a temporary folder.
 - `tests/cli_test.sh` (110 checks): usage errors, help and `--dry-run` output of every command; the `profile` command against a temporary store; `launch` with `/usr/bin/true` and `/bin/echo`; and, when `python3` is available to open ports, end-to-end runs of `check`, `connect`, `connect --profile` and `connect` with a custom client against closed and open loopback ports, with a wake request addressed to `127.0.0.1`.
 
-Not covered automatically: opening a real graphical application such as Moonlight, the look of the window on a real screen, the plain TCP check's own *timed out* path, the *unreachable* and *name not resolved* classifications of the real probes, and a real wake reaching a real PC. The author has run the full flow against a real PC from the command line: wake over Wake-on-LAN, Sunshine answering over Tailscale 26 seconds later.
+Not covered automatically: opening a real graphical application such as Moonlight, WakeDeck quitting for real when such a client closes (the tests replace the quit with a hook), the look of the window on a real screen, the plain TCP check's own *timed out* path, the *unreachable* and *name not resolved* classifications of the real probes, and a real wake reaching a real PC. The author has run the full flow against a real PC from the command line: wake over Wake-on-LAN, Sunshine answering over Tailscale 26 seconds later.
 
 The release script adds its own checks: the same seven tests against a fresh release build, no library linking outside the bundle, every binary running on macOS 13.0, a strict deep signature check, Apple's notarization verdict for the app and for the disk image, stapled tickets validated, and Gatekeeper's assessment of both.
 
@@ -232,13 +243,14 @@ A release is ready when a second person can do the following on their own Mac, w
 
 ## Current Scope
 
-Version 1.0.0, after six milestones: command-line wake prototype, readiness check and session, saved profiles, macOS app lookup and launch, Qt Widgets interface, packaging and release.
+Version 1.1.0: the six milestones of 1.0.0 (command-line wake prototype, readiness check and session, saved profiles, macOS app lookup and launch, Qt Widgets interface, packaging and release) and the Quit When Client Closes option.
 
 Not here, and worth knowing:
 
 - Apple Silicon only in the published disk image; Intel Macs would need a universal build that has not been tested.
 - No automatic updates; new versions are downloaded by hand.
 - Stream mode runs Moonlight's executable directly, so the arguments always arrive even if Moonlight is already open; a second Moonlight window may then appear until the first is closed.
+- Quit When Client Closes watches only the client process WakeDeck started. In Open mode with Moonlight already running, WakeDeck stays open; a custom client that hands its work to another program and exits at once makes WakeDeck quit at that moment, so turn the option off for such a client.
 - IPv4 only. SecureOn passwords are not supported.
 - macOS only, by design: the client launcher uses Launch Services and NSWorkspace.
 - Development builds against Homebrew's Qt run only on the macOS version Homebrew built Qt for; the published disk image uses Qt's official binaries and runs on macOS 13 and later.
@@ -246,9 +258,9 @@ Not here, and worth knowing:
 ## Concepts Demonstrated
 
 - Byte-level data with the C++17 standard library: `std::array<std::uint8_t, N>`, `std::optional` for parse results, `std::string_view` parsing, `std::from_chars`.
-- Resource management with RAII: a socket descriptor owned by one object, released in its destructor, non-copyable.
+- Resource management with RAII: a socket descriptor and a kqueue descriptor, each owned by one object, released in its destructor, non-copyable.
 - Interfaces separating policy from mechanism: `DatagramSink`, `Probe`, `Waker`, `Launcher`, with factories so tests substitute fakes, in the engine and in the window alike.
-- Event-driven programming without threads: Qt signals and slots, timers, asynchronous sockets and name lookups; a state machine (`Session`) that advances only when something finishes; a window that never blocks.
+- Event-driven programming without threads: Qt signals and slots, timers, asynchronous sockets and name lookups, a kernel event queue (kqueue) for another process's exit; a state machine (`Session`) that advances only when something finishes; a window that never blocks.
 - A serialization boundary: value types in memory, JSON on disk, validation at the edge with messages that name the field, a schema version for the future, atomic writes and recovery that never deletes the user's data.
 - A platform layer: a plain C++ interface implemented once in Objective-C++, so AppKit, blocks and automatic reference counting stay in one file, and a system completion handler that hops back onto the Qt event loop before touching any object.
 - A graphical interface kept thin: Qt Widgets, layouts and dialogs that only display what the engine reports, testable on the offscreen platform without a screen.

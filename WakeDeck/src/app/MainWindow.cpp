@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QShowEvent>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -27,6 +28,7 @@
 #include "ProfileEditorDialog.h"
 #include "engine/ClientLauncher.h"
 #include "engine/Explain.h"
+#include "engine/ProcessWatcher.h"
 #include "engine/QtWaker.h"
 #include "engine/ServiceProbe.h"
 
@@ -51,6 +53,12 @@ MainWindow::FactoriesFor MainWindow::defaultFactories() {
 
 MainWindow::MainWindow(ProfileStore store, FactoriesFor factoriesFor, QWidget* parent)
     : QMainWindow(parent), store_(std::move(store)), factoriesFor_(std::move(factoriesFor)) {
+    quitHook_ = [] {
+        // Queued, so the timeline line and the current signal finish first.
+        QTimer::singleShot(0, QCoreApplication::instance(), [] { QCoreApplication::quit(); });
+    };
+    clientWatcher_ = new ProcessWatcher(this);
+    connect(clientWatcher_, &ProcessWatcher::exited, this, &MainWindow::onClientExited);
     setWindowTitle(QStringLiteral("WakeDeck"));
     resize(960, 640);
     buildUi();
@@ -232,6 +240,15 @@ void MainWindow::buildMenus() {
     run->addAction(QStringLiteral("&Open Client"), this, &MainWindow::startOpenClient);
     run->addSeparator();
     run->addAction(QStringLiteral("Cancel"), this, &MainWindow::cancelRun);
+    run->addSeparator();
+    quitWhenClientClosesAction_ = run->addAction(QStringLiteral("&Quit When Client Closes"));
+    quitWhenClientClosesAction_->setObjectName(QStringLiteral("quitWhenClientClosesAction"));
+    quitWhenClientClosesAction_->setCheckable(true);
+    quitWhenClientClosesAction_->setChecked(QSettings().value(QLatin1String(kQuitWhenClientClosesKey), true).toBool());
+    quitWhenClientClosesAction_->setToolTip(
+        QStringLiteral("When the client WakeDeck opened closes, for example because the stream ended, WakeDeck quits too. "
+                       "A client you opened yourself is never watched."));
+    connect(quitWhenClientClosesAction_, &QAction::toggled, this, &MainWindow::onQuitOptionToggled);
 
     QMenu* help = menuBar()->addMenu(QStringLiteral("&Help"));
     help->addAction(QStringLiteral("How Waking &Works"), this, &MainWindow::showHowWakingWorks);
@@ -447,6 +464,7 @@ void MainWindow::setRunning(bool running) {
 }
 
 void MainWindow::beginStep(const Profile& profile) {
+    stopWatchingClient();  // a new step: the previous client is no longer this window's business
     runProfileName_ = profile.name;
     resetRunDisplay();
     stepInFlight_ = true;
@@ -484,6 +502,7 @@ void MainWindow::appendTimeline(const TimelineEvent& event) {
 void MainWindow::startWakeAndConnect() {
     const Profile* profile = currentProfile();
     if (!profile || isRunning()) return;
+    stopWatchingClient();  // a new run: the previous client is no longer this window's business
     runProfileName_ = profile->name;
     resetRunDisplay();
     serviceStatus_->setText(QStringLiteral("checking…"));
@@ -518,7 +537,11 @@ void MainWindow::onSessionState(SessionState state) {
 }
 
 void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
+    qint64 launchedPid = 0;
+    QString launchedClient;
     if (session_) {
+        launchedPid = session_->launchedPid();
+        launchedClient = session_->launchedClient();
         session_->deleteLater();
         session_ = nullptr;
     }
@@ -527,6 +550,7 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
     case Outcome::ReadyWithoutWake:
     case Outcome::ReadyAfterWake:
         serviceStatus_->setText(serviceStatus_->text() + QStringLiteral(". %1").arg(summary));
+        if (!launchedClient.isEmpty()) watchClient(launchedPid, launchedClient);
         break;
     case Outcome::TimedOut:
         serviceStatus_->setText(QStringLiteral("not ready: timed out"));
@@ -622,6 +646,7 @@ void MainWindow::startOpenClient() {
         event.kind = ok ? EventKind::Info : EventKind::Failure;
         event.text = summary;
         appendTimeline(event);
+        if (ok) watchClient(launcher->launchedPid(), launcher->describe());
         endStep();
         if (!ok) {
             const Profile* profile = runProfile();
@@ -629,6 +654,72 @@ void MainWindow::startOpenClient() {
         }
     });
     launcher->start();
+}
+
+// ---- Quit when the client closes ----------------------------------------------
+
+bool MainWindow::quitWhenClientCloses() const {
+    return quitWhenClientClosesAction_->isChecked();
+}
+
+void MainWindow::setQuitWhenClientCloses(bool on) {
+    quitWhenClientClosesAction_->setChecked(on);  // toggled() saves it and stops a watch
+}
+
+bool MainWindow::isWatchingClient() const {
+    return clientWatcher_->isWatching();
+}
+
+qint64 MainWindow::watchedClientPid() const {
+    return clientWatcher_->pid();
+}
+
+void MainWindow::onQuitOptionToggled(bool on) {
+    QSettings().setValue(QLatin1String(kQuitWhenClientClosesKey), on);
+    if (!on && isWatchingClient()) {
+        const QString client = watchedClient_;
+        stopWatchingClient();
+        note(QStringLiteral("No longer watching %1; WakeDeck stays open when it closes").arg(client));
+    }
+}
+
+void MainWindow::watchClient(qint64 pid, const QString& client) {
+    stopWatchingClient();
+    if (!quitWhenClientCloses()) return;
+    if (pid <= 0) {
+        // Only a process WakeDeck started itself is watched; when the system just
+        // brought an already-running copy to the front, it belongs to the user.
+        note(QStringLiteral("Not watching %1: no process of its own was started (it may have been running already), "
+                            "so WakeDeck stays open")
+                 .arg(client));
+        return;
+    }
+    if (!clientWatcher_->watch(pid)) {
+        note(QStringLiteral("Could not watch %1 (process %2); WakeDeck stays open when it closes").arg(client).arg(pid));
+        return;
+    }
+    watchedClient_ = client;
+    note(QStringLiteral("Watching %1 (process %2) — WakeDeck will quit when it closes").arg(client).arg(pid));
+}
+
+void MainWindow::stopWatchingClient() {
+    clientWatcher_->stop();
+    watchedClient_.clear();
+}
+
+void MainWindow::onClientExited(qint64 pid) {
+    const QString client = watchedClient_;
+    watchedClient_.clear();
+    note(QStringLiteral("%1 closed (process %2); quitting WakeDeck").arg(client).arg(pid));
+    if (quitHook_) quitHook_();
+}
+
+void MainWindow::note(const QString& text, EventKind kind) {
+    TimelineEvent event;
+    event.at = QDateTime::currentDateTime();
+    event.kind = kind;
+    event.text = text;
+    appendTimeline(event);
 }
 
 void MainWindow::keepWaiting() {

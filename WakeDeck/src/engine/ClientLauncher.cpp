@@ -154,7 +154,8 @@ void ClientLauncher::start() {
     }
     const LaunchPlan plan = *resolution.plan;
     if (plan.openBundle) {
-        platform::openApplication(plan.program, this, [this, plan](bool ok, const QString& error) {
+        platform::openApplication(plan.program, this, [this, plan](bool ok, const QString& error, qint64 pid) {
+            if (ok) pid_ = pid;
             finish(ok, ok ? QStringLiteral("Opened %1").arg(plan.description)
                           : QStringLiteral("could not open %1: %2").arg(plan.program, error));
         });
@@ -162,6 +163,7 @@ void ClientLauncher::start() {
     }
     qint64 pid = 0;
     const bool started = QProcess::startDetached(plan.program, plan.arguments, QDir::homePath(), &pid);
+    pid_ = started ? pid : 0;
     const QString summary = started
         ? QStringLiteral("Launched %1 (process %2)").arg(plan.description).arg(pid)
         : QStringLiteral("could not start %1").arg((QStringList{plan.program} + plan.arguments).join(QLatin1Char(' ')));
