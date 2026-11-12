@@ -316,7 +316,8 @@ void MainWindow::refreshDetails() {
     checkLabel_->setText(QStringLiteral("%1, every %2 s for up to %3")
                              .arg(describe(profile->check), QString::number(profile->pollIntervalMs / 1000.0),
                                   formatDuration(profile->overallTimeoutMs)));
-    wakeLabel_->setText(profile->wake ? describe(*profile->wake) : QStringLiteral("none configured (always-on computer)"));
+    wakeLabel_->setText(profile->wake ? QStringLiteral("%1; %2").arg(describe(*profile->wake), describeResend(*profile->wake))
+                                      : QStringLiteral("none configured (always-on computer)"));
     clientLabel_->setText(describe(profile->client));
     notesLabel_->setText(profile->notes.isEmpty() ? QStringLiteral("–") : profile->notes);
     setRunning(isRunning());  // one place decides which buttons are enabled
@@ -479,6 +480,7 @@ void MainWindow::endStep() {
 
 void MainWindow::resetRunDisplay() {
     timeline_->clear();
+    wakeSendCount_ = 0;
     wakeStatus_->setText(QStringLiteral("not sent"));
     serviceStatus_->setText(QStringLiteral("not checked"));
     explanationPanel_->setVisible(false);
@@ -506,7 +508,9 @@ void MainWindow::startWakeAndConnect() {
     runProfileName_ = profile->name;
     resetRunDisplay();
     serviceStatus_->setText(QStringLiteral("checking…"));
-    session_ = new Session(profile->toSessionConfig(), factoriesFor_(*profile), this);
+    SessionConfig config = profile->toSessionConfig();
+    if (sessionConfigHook_) sessionConfigHook_(config);
+    session_ = new Session(config, factoriesFor_(*profile), this);
     connect(session_, &Session::timelineEvent, this, &MainWindow::onSessionEvent);
     connect(session_, &Session::stateChanged, this, &MainWindow::onSessionState);
     connect(session_, &Session::finished, this, &MainWindow::onSessionFinished);
@@ -518,6 +522,14 @@ void MainWindow::onSessionEvent(const TimelineEvent& event) {
     appendTimeline(event);
     switch (event.kind) {
     case EventKind::WakeSent:
+        ++wakeSendCount_;
+        if (wakeSendCount_ > 1) {
+            // Resent while waiting: how often, and when the last one left.
+            wakeStatus_->setText(QStringLiteral("sent %1 times, last at %2 (%3)")
+                                     .arg(wakeSendCount_)
+                                     .arg(stamp(event.at), event.text.section(QLatin1String(": "), 1)));
+            break;
+        }
         wakeStatus_->setText(QStringLiteral("sent at %1 (%2)").arg(stamp(event.at), event.text.section(QLatin1String(": "), 1)));
         break;
     case EventKind::Ready:
@@ -795,6 +807,7 @@ QString MainWindow::serviceStatusText() const { return serviceStatus_->text(); }
 QString MainWindow::explanationText() const { return explanation_->toPlainText(); }
 bool MainWindow::explanationVisible() const { return !explanationPanel_->isHidden(); }
 bool MainWindow::locateOffered() const { return !locateButton_->isHidden(); }
+QString MainWindow::wakeDetailsText() const { return wakeLabel_->text(); }
 
 // ---- Help -------------------------------------------------------------------
 
@@ -805,8 +818,11 @@ void MainWindow::showHowWakingWorks() {
             "A wake request is a \"magic packet\": a small UDP message that holds the computer's MAC address sixteen "
             "times. A sleeping computer has no working network address, so the packet has to reach its own network "
             "segment, normally as a broadcast on that LAN, where the network card recognises it and powers the machine on.\n\n"
-            "Same network: send to the network's broadcast address, for example 192.168.1.255. Most Wi-Fi adapters "
-            "cannot wake a powered-off computer; Ethernet usually can.\n\n"
+            "Same network: send to the network's broadcast address, for example 192.168.1.255, or choose \"Every local "
+            "network this Mac is on\" and WakeDeck finds the broadcast addresses itself each time it sends. Most Wi-Fi "
+            "adapters cannot wake a powered-off computer; Ethernet usually can.\n\n"
+            "While WakeDeck waits for the service it sends the wake request again every 15 seconds by default (\"Send "
+            "again every\" in the editor), in case the first packets were missed.\n\n"
             "From elsewhere: the internet and VPNs route packets to running hosts and do not carry LAN broadcasts, and a "
             "sleeping computer is not on your VPN at all. Something always on inside the home network has to emit the "
             "broadcast for you: a router with a wake feature or a port forward, or a small always-on device that relays "

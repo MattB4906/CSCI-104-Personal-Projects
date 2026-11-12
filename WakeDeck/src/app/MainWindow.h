@@ -45,6 +45,11 @@ public:
     using QuitHook = std::function<void()>;
     void setQuitHook(QuitHook hook) { quitHook_ = std::move(hook); }
 
+    // Adjusts the configuration of each Wake & Connect run before it starts.
+    // Tests use it for millisecond intervals a profile cannot hold (resends).
+    using SessionConfigHook = std::function<void(SessionConfig&)>;
+    void setSessionConfigHook(SessionConfigHook hook) { sessionConfigHook_ = std::move(hook); }
+
     // "Quit When Client Closes" (Run menu): on by default, remembered with
     // QSettings under kQuitWhenClientClosesKey for the application's
     // organization and name. Turning it off stops a current watch.
@@ -68,6 +73,7 @@ public:
     QString explanationText() const;
     bool explanationVisible() const;
     bool locateOffered() const;
+    QString wakeDetailsText() const;  // the selected computer's "Wake:" line in the details pane
 
     // Actions, also bound to the buttons and menus.
     bool addProfile(Profile profile, QString* error = nullptr);  // adds or replaces, then saves
@@ -127,6 +133,7 @@ private:
     Session* session_ = nullptr;  // child of this window while a run is active
     bool stepInFlight_ = false;   // a single check, wake or open is in progress
     QString runProfileName_;      // which computer the displayed run belongs to
+    int wakeSendCount_ = 0;       // wake requests sent in the displayed run, resends included
     QString pendingWarnings_;     // load warnings to show once the window is visible
     // Follows the client process WakeDeck itself started last, for as long as it
     // lives, so that a later launch that only finds it running can watch it again.
@@ -134,6 +141,7 @@ private:
     bool quitArmed_ = false;      // its exit quits WakeDeck (option on, no newer run or step)
     QString watchedClient_;       // its description, for the timeline
     QuitHook quitHook_;
+    SessionConfigHook sessionConfigHook_;
     QAction* quitWhenClientClosesAction_ = nullptr;
 
     QListWidget* list_ = nullptr;

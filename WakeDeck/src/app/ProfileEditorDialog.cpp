@@ -62,9 +62,20 @@ void ProfileEditorDialog::buildUi() {
     macEdit_ = new QLineEdit(wakeBox);
     macEdit_->setObjectName(QStringLiteral("macEdit"));
     macEdit_->setPlaceholderText(QStringLiteral("00:00:5E:00:53:2A"));
+    destinationModeCombo_ = new QComboBox(wakeBox);
+    destinationModeCombo_->setObjectName(QStringLiteral("destinationModeCombo"));
+    destinationModeCombo_->addItem(QStringLiteral("Every local network this Mac is on"), QStringLiteral("localNetworks"));
+    destinationModeCombo_->addItem(QStringLiteral("A specific address"), QStringLiteral("address"));
     destinationEdit_ = new QLineEdit(wakeBox);
     destinationEdit_->setObjectName(QStringLiteral("destinationEdit"));
     destinationEdit_->setPlaceholderText(QStringLiteral("192.168.1.255, the broadcast address of the computer's network"));
+    resendSpin_ = new QSpinBox(wakeBox);
+    resendSpin_->setObjectName(QStringLiteral("resendSpin"));
+    resendSpin_->setRange(0, WakeConfig::kMaxResendSeconds);
+    resendSpin_->setSuffix(QStringLiteral(" s"));
+    resendSpin_->setSpecialValueText(QStringLiteral("Only once"));
+    resendSpin_->setToolTip(QStringLiteral("While waiting for the service, send the whole wake request again this often. "
+                                           "Only once, or 5 to 600 seconds."));
     portsEdit_ = new QLineEdit(wakeBox);
     portsEdit_->setObjectName(QStringLiteral("portsEdit"));
     portsEdit_->setPlaceholderText(QStringLiteral("9,7"));
@@ -74,10 +85,13 @@ void ProfileEditorDialog::buildUi() {
     intervalSpin_->setRange(0, 10000);
     intervalSpin_->setSuffix(QStringLiteral(" ms"));
     wakeLayout->addRow(QStringLiteral("MAC address:"), macEdit_);
-    wakeLayout->addRow(QStringLiteral("Send to:"), destinationEdit_);
+    wakeLayout->addRow(QStringLiteral("Send to:"), destinationModeCombo_);
+    wakeLayout->addRow(QStringLiteral("Address:"), destinationEdit_);
     wakeLayout->addRow(QStringLiteral("UDP ports:"), portsEdit_);
     wakeLayout->addRow(QStringLiteral("Packets per port:"), repeatSpin_);
     wakeLayout->addRow(QStringLiteral("Pause between packets:"), intervalSpin_);
+    wakeLayout->addRow(QStringLiteral("Send again every:"), resendSpin_);
+    connect(destinationModeCombo_, &QComboBox::currentIndexChanged, this, [this](int) { updateEnabledFields(); });
     auto* wakeTestRow = new QHBoxLayout;
     wakeTestButton_ = new QPushButton(QStringLiteral("Test wake"), wakeBox);
     wakeTestLabel_ = new QLabel(wakeBox);
@@ -187,16 +201,20 @@ void ProfileEditorDialog::setProfile(const Profile& profile) {
     wakeEnabled_->setChecked(profile.wake.has_value());
     if (profile.wake) {
         macEdit_->setText(QString::fromStdString(profile.wake->mac.toString()));
+        destinationModeCombo_->setCurrentIndex(destinationModeCombo_->findData(destinationModeName(profile.wake->destinationMode)));
         destinationEdit_->setText(QString::fromStdString(profile.wake->target.destination));
         portsEdit_->setText(portsText(profile.wake->target.ports));
         repeatSpin_->setValue(static_cast<int>(profile.wake->target.repeat));
         intervalSpin_->setValue(static_cast<int>(profile.wake->target.interval.count()));
+        resendSpin_->setValue(profile.wake->resendSeconds);
     } else {
         macEdit_->clear();
+        destinationModeCombo_->setCurrentIndex(destinationModeCombo_->findData(QStringLiteral("address")));  // as before 1.2
         destinationEdit_->clear();
         portsEdit_->setText(QStringLiteral("9,7"));
         repeatSpin_->setValue(5);
         intervalSpin_->setValue(100);
+        resendSpin_->setValue(WakeConfig::kDefaultResendSeconds);
     }
 
     kindCombo_->setCurrentIndex(profile.check.kind == ProbeKind::Sunshine ? 0 : 1);
@@ -219,9 +237,12 @@ void ProfileEditorDialog::setProfile(const Profile& profile) {
 void ProfileEditorDialog::updateEnabledFields() {
     const bool wake = wakeEnabled_->isChecked();
     for (QWidget* w : {static_cast<QWidget*>(macEdit_), static_cast<QWidget*>(destinationEdit_), static_cast<QWidget*>(portsEdit_),
-                       static_cast<QWidget*>(repeatSpin_), static_cast<QWidget*>(intervalSpin_), static_cast<QWidget*>(wakeTestButton_)}) {
+                       static_cast<QWidget*>(repeatSpin_), static_cast<QWidget*>(intervalSpin_), static_cast<QWidget*>(wakeTestButton_),
+                       static_cast<QWidget*>(destinationModeCombo_), static_cast<QWidget*>(resendSpin_)}) {
         w->setEnabled(wake);
     }
+    const bool specificAddress = destinationModeCombo_->currentData().toString() == QLatin1String("address");
+    destinationEdit_->setEnabled(wake && specificAddress);
     const QString preset = clientCombo_->currentData().toString();
     const bool moonlight = preset == QLatin1String("moonlight");
     const bool custom = preset == QLatin1String("custom");
@@ -265,10 +286,13 @@ std::optional<Profile> ProfileEditorDialog::collect(QString* error) const {
             return std::nullopt;
         }
         WakeTarget target;
-        target.destination = destinationEdit_->text().trimmed().toStdString();
-        if (target.destination.empty()) {
-            *reason = QStringLiteral("Enter where to send the wake request, usually the broadcast address of the computer's network, such as 192.168.1.255.");
-            return std::nullopt;
+        const bool localNetworks = destinationModeCombo_->currentData().toString() == QLatin1String("localNetworks");
+        if (!localNetworks) {  // every local network: the address is not used and is stored empty
+            target.destination = destinationEdit_->text().trimmed().toStdString();
+            if (target.destination.empty()) {
+                *reason = QStringLiteral("Enter where to send the wake request, usually the broadcast address of the computer's network, such as 192.168.1.255.");
+                return std::nullopt;
+            }
         }
         const auto ports = parsePortList(portsEdit_->text().toStdString());
         if (!ports) {
@@ -278,7 +302,12 @@ std::optional<Profile> ProfileEditorDialog::collect(QString* error) const {
         target.ports = *ports;
         target.repeat = static_cast<unsigned>(repeatSpin_->value());
         target.interval = std::chrono::milliseconds(intervalSpin_->value());
-        profile.wake = WakeConfig{*mac, target};
+        if (!resendSecondsError(resendSpin_->value()).isEmpty()) {
+            *reason = QStringLiteral("Send again every: choose Only once (0) or 5 to 600 seconds.");
+            return std::nullopt;
+        }
+        profile.wake = WakeConfig{*mac, target, localNetworks ? WakeDestination::LocalNetworks : WakeDestination::Address,
+                                  resendSpin_->value()};
     }
 
     const QString preset = clientCombo_->currentData().toString();

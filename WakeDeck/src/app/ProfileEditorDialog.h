@@ -41,7 +41,9 @@ private:
 
     QCheckBox* wakeEnabled_ = nullptr;
     QLineEdit* macEdit_ = nullptr;
+    QComboBox* destinationModeCombo_ = nullptr;  // every local network, or a specific address
     QLineEdit* destinationEdit_ = nullptr;
+    QSpinBox* resendSpin_ = nullptr;             // seconds; 0 is shown as "Only once"
     QLineEdit* portsEdit_ = nullptr;
     QSpinBox* repeatSpin_ = nullptr;
     QSpinBox* intervalSpin_ = nullptr;
