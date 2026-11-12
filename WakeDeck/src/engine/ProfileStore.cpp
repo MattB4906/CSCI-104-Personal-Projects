@@ -155,6 +155,39 @@ QString ProfileStore::v1BackupPath() const {
 }
 
 bool ProfileStore::save(const std::vector<Profile>& profiles, QString* error) const {
+    if (QFile::exists(path_)) {
+        // Never replace a file that load() refuses and leaves in place: one this
+        // version cannot read at all, one written by a newer WakeDeck, or a
+        // single exported profile. (A file that is not JSON is moved aside by
+        // load() and is not here any more.)
+        QFile current(path_);
+        if (!current.open(QIODevice::ReadOnly)) {
+            if (error) *error = QStringLiteral("cannot read %1 (%2), so it was not replaced").arg(path_, current.errorString());
+            return false;
+        }
+        const QJsonDocument document = QJsonDocument::fromJson(current.readAll());
+        current.close();
+        const QJsonObject root = document.object();
+        const QJsonValue version = root.value(QLatin1String("schemaVersion"));
+        if (document.isObject() && version.isDouble() && version.toDouble() > Profile::kSchemaVersion) {
+            if (error) {
+                *error = QStringLiteral("%1 was written by a newer WakeDeck (schema %2); it was left untouched and nothing "
+                                        "was saved")
+                             .arg(path_)
+                             .arg(version.toDouble());
+            }
+            return false;
+        }
+        if (document.isObject() && !root.value(QLatin1String("profiles")).isArray() &&
+            root.contains(QLatin1String("name")) && root.contains(QLatin1String("check"))) {
+            if (error) {
+                *error = QStringLiteral("%1 is a single profile file, not a profiles store; it was left untouched and "
+                                        "nothing was saved")
+                             .arg(path_);
+            }
+            return false;
+        }
+    }
     if (QFile::exists(path_) && !QFile::exists(v1BackupPath())) {
         // Is the file about to be replaced a version 1 store (or one from before
         // the schema version existed)? Then keep it for WakeDeck 1.0 and 1.1.

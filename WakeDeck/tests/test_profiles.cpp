@@ -453,6 +453,47 @@ private slots:
         QCOMPARE(filesStartingWith(dir.path(), QStringLiteral("profiles.")).size(), 1);  // no backup, no copy
     }
 
+    void saveNeverReplacesAFileLoadRefused() {
+        // Review finding A: what load() refuses and leaves in place, save() must
+        // not replace either, whoever calls it.
+        QTemporaryDir dir;
+        struct Case {
+            QString file;
+            QByteArray content;
+            QString reason;
+        };
+        const std::vector<Case> cases = {
+            {QStringLiteral("newer.json"), R"({"schemaVersion": 3, "profiles": []})", QStringLiteral("newer WakeDeck")},
+            {QStringLiteral("single.json"), R"({"schemaVersion": 2, "name": "X", "check": {"host": "h"}})",
+             QStringLiteral("single profile")},
+        };
+        for (const Case& c : cases) {
+            const QString path = dir.filePath(c.file);
+            QVERIFY(writeText(path, c.content));
+            const ProfileStore store(path);
+            QVERIFY(!store.load().ok);
+            QString error;
+            QVERIFY(!store.save({fullProfile()}, &error));
+            QVERIFY2(error.contains(c.reason), qPrintable(error));
+            QVERIFY2(error.contains(QStringLiteral("left untouched")), qPrintable(error));
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), c.content);
+            QVERIFY(!QFile::exists(store.v1BackupPath()));
+        }
+        // A file that cannot be read is not replaced either.
+        const QString locked = dir.filePath(QStringLiteral("locked.json"));
+        QVERIFY(writeText(locked, R"({"schemaVersion": 2, "profiles": []})"));
+        QVERIFY(QFile::setPermissions(locked, QFileDevice::WriteOwner));
+        QString error;
+        const bool saved = ProfileStore(locked).save({fullProfile()}, &error);
+        QFile::setPermissions(locked, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        QVERIFY(!saved);
+        QVERIFY2(error.contains(QStringLiteral("was not replaced")), qPrintable(error));
+        // A current store is still saved as usual.
+        QVERIFY(ProfileStore(locked).save({fullProfile()}, &error));
+    }
+
     void version1StoreLoadsWithDefaults() {
         QTemporaryDir dir;
         const QString path = dir.filePath(QStringLiteral("profiles.json"));
