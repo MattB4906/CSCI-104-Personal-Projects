@@ -1,5 +1,5 @@
 // macOS implementation of AppLocator (Objective-C++, compiled with ARC).
-// This is the only file in WakeDeck that speaks to AppKit.
+// This is the engine's only file that speaks to AppKit (the window's is SystemServices.mm).
 #include "engine/AppLocator.h"
 
 #import <AppKit/AppKit.h>

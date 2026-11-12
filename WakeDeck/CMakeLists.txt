@@ -91,9 +91,19 @@ add_library(wakedeck_ui STATIC
   src/app/MainWindow.h
   src/app/MainWindow.cpp
   src/app/ProfileEditorDialog.h
-  src/app/ProfileEditorDialog.cpp)
+  src/app/ProfileEditorDialog.cpp
+  src/app/SystemServices.h
+  src/app/SystemServices.cpp
+  src/app/WaitProgress.h
+  src/app/WaitProgress.cpp
+  src/app/Diagnose.h
+  src/app/Diagnose.cpp
+  src/mac/SystemServices.mm)
 target_include_directories(wakedeck_ui PUBLIC src)
 target_link_libraries(wakedeck_ui PUBLIC wakedeck_engine Qt6::Widgets)
+# The "ready" notification and the Dock progress (src/mac/SystemServices.mm).
+set_source_files_properties(src/mac/SystemServices.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+target_link_libraries(wakedeck_ui PUBLIC "-framework AppKit" "-framework UserNotifications")
 
 set(WAKEDECK_ICON ${CMAKE_CURRENT_SOURCE_DIR}/packaging/icon/WakeDeck.icns)
 set_source_files_properties(${WAKEDECK_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
