@@ -70,7 +70,34 @@ expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 -
 expect 1 "connect with bad check kind" -- connect --check-host 192.0.2.10 --check bogus
 expect 1 "connect with bad timeout" -- connect --check-host 192.0.2.10 --timeout-s 0
 
-contains "version string" "wakedeck-cli 1.1.0" -- --version
+# Every local network (1.2). The dry run only reads this Mac's interface list;
+# its addresses are checked for shape here and never stored or printed.
+expect 0 "wake dry run on every local network" -- wake --mac "$MAC" --local-networks --dry-run
+contains "local dry run says nothing was sent" "no packet was sent" -- wake --mac "$MAC" --local-networks --dry-run
+contains "local dry run names the destination" "every local network of this Mac" -- wake --mac "$MAC" --local-networks --dry-run
+total=$((total + 1))
+if "$CLI" wake --mac "$MAC" --local-networks --dry-run 2>&1 | grep '^Network ' | grep -v ' none: ' | \
+        grep -qvE '^Network +[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+    failed=$((failed + 1)); echo "FAILED: local dry run lists something other than IPv4 addresses"
+fi
+expect 1 "wake with --to and --local-networks" -- wake --mac "$MAC" --to "$TO" --local-networks --dry-run
+contains "wake with both names the conflict" "either --to or --local-networks" -- wake --mac "$MAC" --to "$TO" --local-networks --dry-run
+contains "wake without a destination names both" "--to or --local-networks is required" -- wake --mac "$MAC" --dry-run
+expect 1 "connect with --to and --local-networks" -- connect --check-host 192.0.2.10 --mac "$MAC" --to "$TO" --local-networks
+expect 1 "connect with --local-networks but no --mac" -- connect --check-host 192.0.2.10 --local-networks
+
+# Resending (1.2): 0 or 5 to 600 seconds, and only with a wake.
+expect 1 "connect with --resend-s 3" -- connect --check-host 192.0.2.10 --mac "$MAC" --to "$TO" --resend-s 3
+expect 1 "connect with --resend-s 601" -- connect --check-host 192.0.2.10 --mac "$MAC" --to "$TO" --resend-s 601
+expect 1 "connect with --resend-s text" -- connect --check-host 192.0.2.10 --mac "$MAC" --to "$TO" --resend-s often
+expect 1 "connect with --resend-s but no wake" -- connect --check-host 192.0.2.10 --resend-s 15
+contains "resend error names the range" "--resend-s must be 0 (send once) or a whole number of seconds from 5 to 600" -- \
+    connect --check-host 192.0.2.10 --mac "$MAC" --to "$TO" --resend-s 4
+contains "connect help names --resend-s" "--resend-s" -- connect --help
+contains "connect help names --local-networks" "--local-networks" -- connect --help
+contains "profile help names --resend-s" "--resend-s" -- profile --help
+
+contains "version string" "wakedeck-cli 1.2.0" -- --version
 contains "help lists check" "check" -- --help
 contains "help lists connect" "connect" -- --help
 contains "help lists profile" "profile" -- --help
@@ -136,6 +163,23 @@ contains "connect from the profile sends the wake" "Wake request sent: 4 packets
 expect 1 "launch with profile and client flag" -- launch --profile "Test PC" --store "$STORE" --client custom --client-path /usr/bin/true
 expect 2 "launch with an unknown profile" -- launch --profile "Nobody" --store "$STORE" --dry-run
 expect 1 "connect with --profile and a client flag" -- connect --profile "Test PC" --store "$STORE" --client moonlight
+expect 1 "connect with --profile and --resend-s" -- connect --profile "Test PC" --store "$STORE" --resend-s 30
+expect 1 "connect with --profile and --local-networks" -- connect --profile "Test PC" --store "$STORE" --local-networks
+contains "profile list shows the default resend" "again every 15 s while waiting" -- profile list --store "$STORE"
+expect 0 "profile add on every local network" -- profile add --store "$STORE" --name "Local PC" --check-host 127.0.0.1 \
+    --mac "$MAC" --local-networks --resend-s 30
+contains "profile show stores the mode" "\"destinationMode\": \"localNetworks\"" -- profile show "Local PC" --store "$STORE"
+contains "profile show stores an empty destination" "\"destination\": \"\"" -- profile show "Local PC" --store "$STORE"
+contains "profile show stores the resend" "\"resendSeconds\": 30" -- profile show "Local PC" --store "$STORE"
+contains "profile show writes version 2" "\"schemaVersion\": 2" -- profile show "Local PC" --store "$STORE"
+contains "profile list describes every network" "10 packets to every local network of this Mac (ports 9 x5, 7 x5), again every 30 s" -- \
+    profile list --store "$STORE"
+expect 0 "profile add with --resend-s 0" -- profile add --store "$STORE" --name "Once PC" --check-host 127.0.0.1 \
+    --mac "$MAC" --to 127.0.0.1 --resend-s 0
+contains "profile list says sent once" "4 packets" -- profile list --store "$STORE"
+contains "profile list shows a single send" "sent once" -- profile list --store "$STORE"
+expect 0 "profile remove the 1.2 entries" -- profile remove "Once PC" --store "$STORE"
+expect 0 "profile remove the local entry" -- profile remove "Local PC" --store "$STORE"
 expect 0 "profile add with a custom client" -- profile add --store "$STORE" --name "Echo PC" --check-host 127.0.0.1 \
     --client custom --client-path /bin/echo --client-args "hi {host}"
 expect 0 "launch --profile dry run" -- launch --profile "Echo PC" --store "$STORE" --dry-run
@@ -151,6 +195,29 @@ expect 0 "corrupt store recovered again within the same second" -- profile list 
 printf 'this is not json' > "$STORE"
 contains "corrupt store warns" "It was moved" -- profile list --store "$STORE"
 rm -rf "$STOREDIR"
+
+# A version 1 store: read as it is, kept once as profiles.v1-backup.json when first replaced.
+V1DIR=$(mktemp -d)
+V1STORE="$V1DIR/profiles.json"
+printf '%s' '{"schemaVersion": 1, "profiles": [{"schemaVersion": 1, "name": "Old PC", "check": {"host": "127.0.0.1"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "127.0.0.1"}}]}' > "$V1STORE"
+cp "$V1STORE" "$V1DIR/original.json"
+contains "version 1 store is listed" "Old PC" -- profile list --store "$V1STORE"
+total=$((total + 1))
+if [ -e "$V1DIR/profiles.v1-backup.json" ]; then failed=$((failed + 1)); echo "FAILED: reading a version 1 store made a backup"; fi
+expect 0 "first save over a version 1 store" -- profile add --store "$V1STORE" --name "New PC" --check-host 127.0.0.1
+total=$((total + 1))
+if ! cmp -s "$V1DIR/original.json" "$V1DIR/profiles.v1-backup.json"; then failed=$((failed + 1)); echo "FAILED: version 1 backup missing or different"; fi
+expect 0 "second save" -- profile remove "New PC" --store "$V1STORE"
+total=$((total + 1))
+if ! cmp -s "$V1DIR/original.json" "$V1DIR/profiles.v1-backup.json"; then failed=$((failed + 1)); echo "FAILED: version 1 backup was overwritten"; fi
+contains "the store is version 2 now" "\"schemaVersion\": 2" -- profile show "Old PC" --store "$V1STORE"
+printf '%s' '{"schemaVersion": 3, "profiles": []}' > "$V1DIR/future.json"
+cp "$V1DIR/future.json" "$V1DIR/future-original.json"
+expect 2 "a version 3 store is refused" -- profile list --store "$V1DIR/future.json"
+expect 2 "a version 3 store is not replaced" -- profile add --store "$V1DIR/future.json" --name "X" --check-host 127.0.0.1
+total=$((total + 1))
+if ! cmp -s "$V1DIR/future.json" "$V1DIR/future-original.json"; then failed=$((failed + 1)); echo "FAILED: a version 3 store was modified"; fi
+rm -rf "$V1DIR"
 contains "dry run plan line" "10 packets: port 9 x5, port 7 x5, 100 ms apart" -- wake --mac "$MAC" --to "$TO" --dry-run
 contains "dry run sends nothing" "nothing was sent" -- wake --mac "$MAC" --to "$TO" --dry-run
 contains "dry run hex dump" "FF FF FF FF FF FF 00 00 5E 00 53 2A 00 00 5E 00" -- wake --mac "$MAC" --to "$TO" --dry-run

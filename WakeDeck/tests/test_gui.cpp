@@ -854,6 +854,103 @@ private slots:
         QCOMPARE(quits, 0);
     }
 
+    // ---- Resending and every local network (1.2) ----
+
+    void wakeFactCountsResends() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, false)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->probeDelayMs = 10;
+        script->statuses = std::vector<ProbeStatus>(15, ProbeStatus::TimedOut);
+        script->statuses.push_back(ProbeStatus::Ready);
+        MainWindow window(store, fakeFactories(script));
+        window.setSessionConfigHook([](SessionConfig& config) { config.resendIntervalMs = 30; });
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyAfterWake);
+        QVERIFY2(script->wakersCreated >= 3, qPrintable(QString::number(script->wakersCreated)));
+        const QString fact = window.wakeStatusText();
+        // A resend still in flight when the service answered may not be counted, so no exact number.
+        QVERIFY2(fact.startsWith(QStringLiteral("sent ")) && fact.contains(QStringLiteral(" times, last at ")), qPrintable(fact));
+        QVERIFY2(fact.endsWith(QStringLiteral("(10 packets to 192.0.2.255 (ports 9 x5, 7 x5))")), qPrintable(fact));
+        QCOMPARE(window.timelineTexts().filter(QStringLiteral("Wake request sent again (2nd time)")).size(), 1);
+        QCOMPARE(window.timelineTexts().filter(QStringLiteral("Wake request sent: ")).size(), 1);
+    }
+
+    void detailsPaneShowsResendAndDestination() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile everyNetwork = sampleProfile(QStringLiteral("Local PC"), true, false);
+        everyNetwork.wake->destinationMode = WakeDestination::LocalNetworks;
+        everyNetwork.wake->target.destination.clear();
+        everyNetwork.wake->resendSeconds = 0;
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, false), everyNetwork}, nullptr));
+        MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+        window.selectProfile(QStringLiteral("PC"));
+        QCOMPARE(window.wakeDetailsText(), QStringLiteral("10 packets to 192.0.2.255 (ports 9 x5, 7 x5); again every 15 s while waiting"));
+        window.selectProfile(QStringLiteral("Local PC"));
+        QCOMPARE(window.wakeDetailsText(), QStringLiteral("10 packets to every local network of this Mac (ports 9 x5, 7 x5); sent once"));
+    }
+
+    void editorChoosesEveryLocalNetworkAndResend() {
+        Profile profile = sampleProfile(QStringLiteral("Local PC"), true, false);
+        profile.wake->destinationMode = WakeDestination::LocalNetworks;
+        profile.wake->target.destination.clear();
+        profile.wake->resendSeconds = 30;
+        profile.pollIntervalMs = 4000;  // the editor works in whole seconds
+        ProfileEditorDialog dialog(profile, false);
+        auto* mode = dialog.findChild<QComboBox*>(QStringLiteral("destinationModeCombo"));
+        auto* address = dialog.findChild<QLineEdit*>(QStringLiteral("destinationEdit"));
+        auto* resend = dialog.findChild<QSpinBox*>(QStringLiteral("resendSpin"));
+        QVERIFY(mode && address && resend);
+        QCOMPARE(mode->itemText(0), QStringLiteral("Every local network this Mac is on"));
+        QCOMPARE(mode->itemText(1), QStringLiteral("A specific address"));
+        QCOMPARE(mode->currentData().toString(), QStringLiteral("localNetworks"));
+        QVERIFY(!address->isEnabled());
+        QCOMPARE(resend->value(), 30);
+        QString error;
+        auto collected = dialog.collect(&error);
+        QVERIFY2(collected.has_value(), qPrintable(error));
+        QCOMPARE(toJson(*collected), toJson(profile));
+
+        // A specific address: the field is enabled and required again.
+        mode->setCurrentIndex(1);
+        QVERIFY(address->isEnabled());
+        QVERIFY(!dialog.collect(&error).has_value());
+        QVERIFY2(error.contains(QStringLiteral("send")), qPrintable(error));
+        address->setText(QStringLiteral("192.168.1.255"));
+        collected = dialog.collect(&error);
+        QVERIFY2(collected.has_value(), qPrintable(error));
+        QCOMPARE(collected->wake->destinationMode, WakeDestination::Address);
+        QCOMPARE(collected->wake->target.destination, std::string("192.168.1.255"));
+
+        // Back to every network: whatever is in the address field is not stored.
+        mode->setCurrentIndex(0);
+        collected = dialog.collect(&error);
+        QVERIFY2(collected.has_value(), qPrintable(error));
+        QVERIFY(collected->wake->target.destination.empty());
+
+        // "Send again every": 0 reads "Only once"; 1 to 4 seconds are refused.
+        resend->setValue(3);
+        QVERIFY(!dialog.collect(&error).has_value());
+        QVERIFY2(error.contains(QStringLiteral("Send again every")), qPrintable(error));
+        resend->setValue(0);
+        QCOMPARE(resend->text(), QStringLiteral("Only once"));
+        collected = dialog.collect(&error);
+        QVERIFY2(collected.has_value(), qPrintable(error));
+        QCOMPARE(collected->wake->resendSeconds, 0);
+    }
+
+    void newComputerDefaultsToASpecificAddress() {
+        ProfileEditorDialog dialog(Profile{}, true);
+        QCOMPARE(dialog.findChild<QComboBox*>(QStringLiteral("destinationModeCombo"))->currentData().toString(), QStringLiteral("address"));
+        QCOMPARE(dialog.findChild<QSpinBox*>(QStringLiteral("resendSpin"))->value(), 15);
+        dialog.findChild<QCheckBox*>(QStringLiteral("wakeEnabled"))->setChecked(true);
+        QVERIFY(dialog.findChild<QLineEdit*>(QStringLiteral("destinationEdit"))->isEnabled());
+    }
+
     // ---- Editor ----
 
     void editorRoundTrip() {

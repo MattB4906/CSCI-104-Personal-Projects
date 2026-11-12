@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "engine/Explain.h"
+#include "engine/LocalNetworks.h"
 #include "engine/QtWaker.h"
 #include "engine/ServiceProbe.h"
 #include "engine/Session.h"
@@ -101,6 +102,39 @@ struct Script {
     int wakersCreated = 0;
     bool wakeOk = true;
     std::optional<bool> launchOk;  // when set, a FakeLauncher with this result replaces NoLauncher
+    // Resend tests: when either is set, a ScriptedWaker replaces FakeWaker.
+    std::vector<bool> wakeResults;  // one per wake request; the last one repeats
+    int wakeDelayMs = 0;
+    int readyAfterMs = -1;          // >= 0: every check is ready once this much time has passed
+    QElapsedTimer clock;            // started by fakeFactories
+    int wakersInFlight = 0;
+    int maxWakersInFlight = 0;
+};
+
+// Counts how many wake requests are in flight at once and answers after a delay.
+class ScriptedWaker final : public Waker {
+public:
+    ScriptedWaker(std::shared_ptr<Script> script, bool ok, QObject* parent)
+        : Waker(parent), script_(std::move(script)), ok_(ok) {}
+    ~ScriptedWaker() override {
+        if (running_) --script_->wakersInFlight;
+    }
+    void start() override {
+        running_ = true;
+        ++script_->wakersInFlight;
+        script_->maxWakersInFlight = std::max(script_->maxWakersInFlight, script_->wakersInFlight);
+        QTimer::singleShot(script_->wakeDelayMs, this, [this] {
+            running_ = false;
+            --script_->wakersInFlight;
+            emit finished(ok_, ok_ ? QStringLiteral("10 packets to 192.0.2.255 (ports 9 x5, 7 x5)")
+                                   : QStringLiteral("0 of 10 packets to 192.0.2.255; cannot open a UDP socket"));
+        });
+    }
+
+private:
+    std::shared_ptr<Script> script_;
+    bool ok_;
+    bool running_ = false;
 };
 
 SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
@@ -110,12 +144,20 @@ SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
         ++script->probesCreated;
         ProbeResult result;
         result.status = script->statuses[index];
+        if (script->readyAfterMs >= 0 && script->clock.elapsed() >= script->readyAfterMs) result.status = ProbeStatus::Ready;
         result.detail = statusName(result.status);
         result.elapsedMs = 1;
         return new FakeProbe(result, parent);
     };
+    script->clock.start();
     factories.waker = [script](const WakeConfig&, QObject* parent) -> Waker* {
         ++script->wakersCreated;
+        if (!script->wakeResults.empty() || script->wakeDelayMs > 0) {
+            const std::size_t index = std::min(static_cast<std::size_t>(script->wakersCreated - 1),
+                                               script->wakeResults.empty() ? 0 : script->wakeResults.size() - 1);
+            const bool ok = script->wakeResults.empty() ? script->wakeOk : script->wakeResults[index];
+            return new ScriptedWaker(script, ok, parent);
+        }
         return new FakeWaker(script->wakeOk, parent);
     };
     if (script->launchOk.has_value()) {
@@ -388,6 +430,337 @@ private slots:
         QVERIFY(QTest::qWaitFor([&ok] { return ok.has_value(); }, 5000));
         QVERIFY(!*ok);
         QVERIFY2(summary.contains(QStringLiteral("cannot resolve")), qPrintable(summary));
+    }
+
+    // ---- Every local network (F2) ----
+
+    void broadcastSelectionFollowsTheRules() {
+        const auto entry = [](const char* ip, const char* broadcast) {
+            return InterfaceDescription::Entry{QHostAddress(QString::fromLatin1(ip)),
+                                               broadcast ? QHostAddress(QString::fromLatin1(broadcast)) : QHostAddress()};
+        };
+        const auto lan = [](const char* name) {
+            InterfaceDescription d;
+            d.name = QString::fromLatin1(name);
+            d.isUp = d.isRunning = d.canBroadcast = true;
+            return d;
+        };
+        std::vector<InterfaceDescription> interfaces;
+        InterfaceDescription ethernet = lan("en0");
+        ethernet.entries = {entry("192.168.1.20", "192.168.1.255"), entry("fe80::1", nullptr)};
+        interfaces.push_back(ethernet);
+        InterfaceDescription wifi = lan("en1");
+        wifi.entries = {entry("10.0.1.5", "10.0.1.255"), entry("10.0.1.6", "10.0.1.255")};  // duplicate
+        interfaces.push_back(wifi);
+        InterfaceDescription bridge = lan("bridge0");
+        bridge.entries = {entry("192.168.1.30", "192.168.1.255")};  // duplicate across interfaces
+        interfaces.push_back(bridge);
+        InterfaceDescription vpn = lan("utun3");  // a VPN tunnel: point-to-point
+        vpn.isPointToPoint = true;
+        vpn.entries = {entry("100.100.1.2", "100.100.1.255")};
+        interfaces.push_back(vpn);
+        InterfaceDescription loopback = lan("lo0");
+        loopback.isLoopback = true;
+        loopback.entries = {entry("127.0.0.1", "127.255.255.255")};
+        interfaces.push_back(loopback);
+        InterfaceDescription down = lan("en2");
+        down.isUp = false;
+        down.entries = {entry("172.16.0.2", "172.16.0.255")};
+        interfaces.push_back(down);
+        InterfaceDescription notRunning = lan("en3");
+        notRunning.isRunning = false;
+        notRunning.entries = {entry("172.16.1.2", "172.16.1.255")};
+        interfaces.push_back(notRunning);
+        InterfaceDescription noBroadcast = lan("en4");
+        noBroadcast.canBroadcast = false;
+        noBroadcast.entries = {entry("172.16.2.2", "172.16.2.255")};
+        interfaces.push_back(noBroadcast);
+        InterfaceDescription noBroadcastAddress = lan("en5");
+        noBroadcastAddress.entries = {entry("172.16.3.2", nullptr)};
+        interfaces.push_back(noBroadcastAddress);
+        InterfaceDescription ipv6Only = lan("en6");
+        ipv6Only.entries = {entry("2001:db8::5", "2001:db8::ff")};
+        interfaces.push_back(ipv6Only);
+
+        QCOMPARE(chooseBroadcastAddresses(interfaces), (QStringList{QStringLiteral("192.168.1.255"), QStringLiteral("10.0.1.255")}));
+        QVERIFY(chooseBroadcastAddresses({}).isEmpty());
+        QVERIFY(chooseBroadcastAddresses({vpn, loopback, down}).isEmpty());
+    }
+
+    void realInterfacesGiveOnlyIPv4() {
+        // Reads this Mac's interface list (a local system call, no traffic) and
+        // prints nothing about it.
+        for (const InterfaceDescription& interface : readLocalInterfaces()) {
+            for (const InterfaceDescription::Entry& entry : interface.entries) {
+                QCOMPARE(entry.ip.protocol(), QAbstractSocket::IPv4Protocol);
+            }
+        }
+        for (const QString& address : localBroadcastAddresses()) {
+            QHostAddress parsed;
+            QVERIFY(parsed.setAddress(address));
+            QCOMPARE(parsed.protocol(), QAbstractSocket::IPv4Protocol);
+            QVERIFY(!parsed.isLoopback());
+        }
+    }
+
+    void wakerSendsThePlanToEveryNetwork() {
+        QUdpSocket listener;
+        QVERIFY(listener.bind(QHostAddress::LocalHost, 0));
+        WakeTarget target;
+        target.ports = {listener.localPort()};
+        target.repeat = 3;
+        target.interval = std::chrono::milliseconds(0);
+        const WakeConfig config{*MacAddress::parse("00:00:5E:00:53:2A"), target, WakeDestination::LocalNetworks};
+        int providerCalls = 0;
+        const BroadcastAddressProvider provider = [&providerCalls] {
+            ++providerCalls;
+            return QStringList{QStringLiteral("127.0.0.1"), QStringLiteral("127.0.0.1")};
+        };
+
+        std::optional<bool> ok;
+        QString summary;
+        QObject parent;
+        auto* waker = new QtWaker(config, provider, &parent);
+        connect(waker, &Waker::finished, [&](bool allSent, const QString& text) {
+            ok = allSent;
+            summary = text;
+        });
+        waker->start();
+        QCOMPARE(providerCalls, 0);  // read when the send begins, on the event loop
+        QVERIFY(QTest::qWaitFor([&ok] { return ok.has_value(); }, 5000));
+        QVERIFY2(*ok, qPrintable(summary));
+        QCOMPARE(providerCalls, 1);
+        QCOMPARE(summary, QStringLiteral("3 packets to each of 2 local networks (127.0.0.1, 127.0.0.1), ports %1 x3")
+                              .arg(listener.localPort()));
+
+        const MagicPacket packet(config.mac);
+        int received = 0;
+        while (received < 6 && QTest::qWaitFor([&listener] { return listener.hasPendingDatagrams(); }, 2000)) {
+            const QNetworkDatagram datagram = listener.receiveDatagram();
+            QCOMPARE(datagram.data().size(), 102);
+            QVERIFY(std::equal(packet.bytes().begin(), packet.bytes().end(),
+                               reinterpret_cast<const std::uint8_t*>(datagram.data().constData())));
+            ++received;
+        }
+        QCOMPARE(received, 6);  // the plan twice, byte for byte
+        QVERIFY(!QTest::qWaitFor([&listener] { return listener.hasPendingDatagrams(); }, 100));
+
+        // A second send reads the list again, since networks change.
+        std::optional<bool> again;
+        auto* second = new QtWaker(config, provider, &parent);
+        connect(second, &Waker::finished, [&again](bool allSent, const QString&) { again = allSent; });
+        second->start();
+        QVERIFY(QTest::qWaitFor([&again] { return again.has_value(); }, 5000));
+        QCOMPARE(providerCalls, 2);
+    }
+
+    void wakerWithoutLocalNetworkFailsCleanly() {
+        WakeTarget target;
+        const WakeConfig config{*MacAddress::parse("00:00:5E:00:53:2A"), target, WakeDestination::LocalNetworks};
+        std::optional<bool> ok;
+        QString summary;
+        QObject parent;
+        auto* waker = new QtWaker(config, [] { return QStringList(); }, &parent);
+        connect(waker, &Waker::finished, [&](bool allSent, const QString& text) {
+            ok = allSent;
+            summary = text;
+        });
+        waker->start();
+        QVERIFY(QTest::qWaitFor([&ok] { return ok.has_value(); }, 5000));
+        QVERIFY(!*ok);
+        QVERIFY2(summary.contains(QStringLiteral("this Mac is not connected to a local network that supports broadcast")),
+                 qPrintable(summary));
+    }
+
+    void localNetworksDescription() {
+        WakeTarget target;
+        const WakeConfig config{*MacAddress::parse("00:00:5E:00:53:2A"), target, WakeDestination::LocalNetworks};
+        QCOMPARE(describe(config), QStringLiteral("10 packets to every local network of this Mac (ports 9 x5, 7 x5)"));
+        QCOMPARE(destinationModeName(config.destinationMode), QStringLiteral("localNetworks"));
+        QCOMPARE(destinationModeName(WakeDestination::Address), QStringLiteral("address"));
+    }
+
+    // ---- Resending the wake request while waiting (F1) ----
+
+    void resendsAtTheIntervalUntilReady() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->readyAfterMs = 300;
+        script->wakeResults = {true};
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 10;
+        config.resendIntervalMs = 60;
+        Session session(config, fakeFactories(script));
+        std::vector<QDateTime> sends;
+        connect(&session, &Session::timelineEvent, [&sends](const TimelineEvent& e) {
+            if (e.kind == EventKind::WakeSent) sends.push_back(e.at);
+        });
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
+        QVERIFY2(script->wakersCreated >= 3, qPrintable(QString::number(script->wakersCreated)));
+        QVERIFY2(script->wakersCreated <= 6, qPrintable(QString::number(script->wakersCreated)));
+        QVERIFY(run.hasEvent(QStringLiteral("Wake request sent: ")));
+        QVERIFY(run.hasEvent(QStringLiteral("Wake request sent again (2nd time): 10 packets")));
+        QVERIFY(run.hasEvent(QStringLiteral("Wake request sent again (3rd time)")));
+        for (std::size_t i = 1; i < sends.size(); ++i) {
+            QVERIFY2(sends[i - 1].msecsTo(sends[i]) >= 55, qPrintable(QString::number(sends[i - 1].msecsTo(sends[i]))));
+        }
+        QCOMPARE(session.observations().wakeSends, static_cast<int>(sends.size()));
+        // Nothing more once the service is ready.
+        const int created = script->wakersCreated;
+        QTest::qWait(150);
+        QCOMPARE(script->wakersCreated, created);
+        QCOMPARE(script->maxWakersInFlight, 1);
+    }
+
+    void resendsStopAtTheTimeLimit() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->wakeResults = {true};
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 10;
+        config.resendIntervalMs = 40;
+        config.overallTimeoutMs = 200;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TimedOut);
+        QVERIFY2(script->wakersCreated >= 3, qPrintable(QString::number(script->wakersCreated)));
+        const int sends = session.observations().wakeSends;
+        QVERIFY2(run.summary.contains(QStringLiteral("Wake request sent %1 times between ").arg(sends)), qPrintable(run.summary));
+        QVERIFY2(run.summary.contains(QStringLiteral("That confirms the packets left this computer")), qPrintable(run.summary));
+        const int created = script->wakersCreated;
+        QTest::qWait(150);
+        QCOMPARE(script->wakersCreated, created);
+    }
+
+    void resendsStopWhenCancelled() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->wakeResults = {true};
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 10;
+        config.resendIntervalMs = 30;
+        config.overallTimeoutMs = 10000;
+        Session session(config, fakeFactories(script));
+        QTimer::singleShot(120, &session, [&session] { session.cancel(); });
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::Cancelled);
+        QVERIFY2(script->wakersCreated >= 2, qPrintable(QString::number(script->wakersCreated)));
+        const int created = script->wakersCreated;
+        QTest::qWait(150);
+        QCOMPARE(script->wakersCreated, created);
+    }
+
+    void noResendWithZero() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 10;
+        config.resendIntervalMs = 0;
+        config.overallTimeoutMs = 200;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TimedOut);
+        QCOMPARE(script->wakersCreated, 1);
+        QCOMPARE(session.observations().wakeSends, 1);
+        QVERIFY(!run.hasEvent(QStringLiteral("sent again")));
+        QVERIFY2(run.summary.contains(QStringLiteral("Wake request sent at")), qPrintable(run.summary));
+    }
+
+    void noResendWhenReadyAtOnce() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Ready};
+        SessionConfig config = quickConfig(true);
+        config.resendIntervalMs = 20;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyWithoutWake);
+        QTest::qWait(80);
+        QCOMPARE(script->wakersCreated, 0);
+    }
+
+    void aFailedResendDoesNotEndTheRun() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->readyAfterMs = 250;
+        script->wakeResults = {true, false, true};
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 10;
+        config.resendIntervalMs = 50;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
+        QVERIFY2(script->wakersCreated >= 3, qPrintable(QString::number(script->wakersCreated)));
+        QVERIFY(run.hasEvent(QStringLiteral("Could not send the wake request again: 0 of 10 packets")));
+        QVERIFY(run.hasKind(EventKind::Failure));
+        // The failed one is not counted: the next success is the 2nd time it was sent.
+        QVERIFY(run.hasEvent(QStringLiteral("Wake request sent again (2nd time)")));
+    }
+
+    void neverTwoWakersAtOnce() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->wakeResults = {true};
+        script->wakeDelayMs = 40;  // each send takes longer than the interval
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 5;
+        config.resendIntervalMs = 5;
+        config.overallTimeoutMs = 300;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TimedOut);
+        QVERIFY2(script->wakersCreated >= 3, qPrintable(QString::number(script->wakersCreated)));
+        QCOMPARE(script->maxWakersInFlight, 1);
+    }
+
+    void explainSeveralSends() {
+        Observations o;
+        o.check.host = QStringLiteral("192.168.1.20");
+        o.wakeConfigured = true;
+        o.wakeSent = true;
+        o.wakeSends = 8;
+        o.wakeAt = QDateTime(QDate(2026, 1, 2), QTime(22, 41, 7));
+        o.lastWakeAt = QDateTime(QDate(2026, 1, 2), QTime(22, 42, 52));
+        o.wakeSummary = QStringLiteral("10 packets to 192.168.1.255 (ports 9 x5, 7 x5)");
+        o.elapsedMs = 120000;
+        const QString text = explainTimeout(o);
+        QVERIFY2(text.contains(QStringLiteral("- Wake request sent 8 times between 22:41:07 and 22:42:52: 10 packets to "
+                                              "192.168.1.255 (ports 9 x5, 7 x5). That confirms the packets left this "
+                                              "computer, not that the PC received them.")),
+                 qPrintable(text));
+        o.wakeSends = 1;
+        o.lastWakeAt = o.wakeAt;
+        QVERIFY(explainTimeout(o).contains(QStringLiteral("- Wake request sent at 22:41:07: 10 packets")));
+    }
+
+    void ordinals() {
+        QCOMPARE(ordinal(1), QStringLiteral("1st"));
+        QCOMPARE(ordinal(2), QStringLiteral("2nd"));
+        QCOMPARE(ordinal(3), QStringLiteral("3rd"));
+        QCOMPARE(ordinal(4), QStringLiteral("4th"));
+        QCOMPARE(ordinal(11), QStringLiteral("11th"));
+        QCOMPARE(ordinal(12), QStringLiteral("12th"));
+        QCOMPARE(ordinal(13), QStringLiteral("13th"));
+        QCOMPARE(ordinal(21), QStringLiteral("21st"));
+        QCOMPARE(ordinal(102), QStringLiteral("102nd"));
+        QCOMPARE(ordinal(111), QStringLiteral("111th"));
+    }
+
+    void resendBounds() {
+        QVERIFY(resendSecondsError(0).isEmpty());
+        QVERIFY(resendSecondsError(5).isEmpty());
+        QVERIFY(resendSecondsError(600).isEmpty());
+        QVERIFY(!resendSecondsError(1).isEmpty());
+        QVERIFY(!resendSecondsError(4).isEmpty());
+        QVERIFY(!resendSecondsError(601).isEmpty());
+        QVERIFY(!resendSecondsError(-1).isEmpty());
     }
 
     // ---- Session state machine with fakes ----
