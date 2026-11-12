@@ -16,7 +16,8 @@ namespace wakedeck::app {
 std::optional<QString> diagnoseTarget(const QStringList& arguments);
 
 // Needs a QGuiApplication. Writes `path` (UTF-8 lines "key=value": version,
-// platform, bundleId, notifications, dockTile) and renders the Dock progress at
+// platform, bundleId, notifications, dockTile, tailscaleCli, tailscaleState,
+// tailscalePeers; never a device name or address) and renders the Dock progress at
 // 40 % into "<path>.dock.png". Returns the process exit code: 0 when the text
 // file was written, non-zero otherwise.
 int runDiagnose(const QString& path);

@@ -18,6 +18,7 @@
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
 #include "engine/Session.h"
+#include "engine/TimingHistory.h"
 
 class QAction;
 class QCloseEvent;
@@ -104,10 +105,16 @@ public:
     bool explanationVisible() const;
     bool locateOffered() const;
     QString wakeDetailsText() const;  // the selected computer's "Wake:" line in the details pane
+    // How long each computer took from the wake request to ready, in the file
+    // beside the profiles store (TimingHistory::pathBeside).
+    TimingHistory timingHistory() const;
 
     // Actions, also bound to the buttons and menus.
     bool addProfile(Profile profile, QString* error = nullptr);  // adds or replaces, then saves
     bool removeCurrentProfile(QString* error = nullptr);
+    // Saves an edited computer that was called `oldName`; a new name replaces any
+    // computer already called that, and the learned timing moves with it.
+    bool updateProfile(const QString& oldName, Profile edited, QString* error = nullptr);
     bool loadExample(QString* error = nullptr);
     void selectProfile(const QString& name);
     void startWakeAndConnect();
@@ -162,10 +169,12 @@ private:
     void startProgress();
     void updateProgress();
     void stopProgress();
-    // How long this computer usually takes to answer after the wait begins, in
-    // ms; 0 = unknown, which makes the progress run against the time limit.
-    // Phase "timing" (learned timing) supplies the real value here.
+    // How long this computer usually takes to answer after the wake request, in
+    // ms, learned from earlier runs; 0 = unknown, which makes the progress run
+    // against the time limit.
     qint64 typicalWaitMs(const Profile& profile) const;
+    void forgetHistory(const QString& name);                      // a computer was deleted
+    void moveHistory(const QString& from, const QString& to);     // a computer was renamed
 
     ProfileStore store_;
     FactoriesFor factoriesFor_;

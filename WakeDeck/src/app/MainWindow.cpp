@@ -403,6 +403,7 @@ bool MainWindow::removeCurrentProfile(QString* error) {
     const QString name = profile->name;  // a copy: the element itself is about to go
     removeProfile(profiles_, name);
     if (!saveProfiles(error)) return false;
+    forgetHistory(name);
     refreshList();
     return true;
 }
@@ -446,9 +447,20 @@ void MainWindow::editCurrent() {
                 QStringLiteral("Another computer is already called \"%1\". Replace it?").arg(edited.name));
             if (answer != QMessageBox::Yes) return;
         }
+    }
+    updateProfile(oldName, std::move(edited));
+}
+
+bool MainWindow::updateProfile(const QString& oldName, Profile edited, QString* error) {
+    const QString newName = edited.name;
+    const bool renamed = !sameProfileName(newName, oldName);
+    if (renamed) {
+        removeProfile(profiles_, newName);  // the one being replaced, if any
         removeProfile(profiles_, oldName);
     }
-    addProfile(std::move(edited));
+    if (!addProfile(std::move(edited), error)) return false;
+    if (renamed) moveHistory(oldName, newName);
+    return true;
 }
 
 void MainWindow::deleteCurrent() {
@@ -549,6 +561,7 @@ void MainWindow::startWakeAndConnect() {
     resetRunDisplay();
     serviceStatus_->setText(QStringLiteral("checking…"));
     SessionConfig config = profile->toSessionConfig();
+    config.learned = timingHistory().learned(profile->name);
     if (sessionConfigHook_) sessionConfigHook_(config);
     session_ = new Session(config, factoriesFor_(*profile), this);
     connect(session_, &Session::timelineEvent, this, &MainWindow::onSessionEvent);
@@ -594,6 +607,14 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
     qint64 runningPid = 0;
     QString launchedClient;
     if (session_) {
+        if (outcome == Outcome::ReadyAfterWake && session_->wakeToReadyMs()) {
+            // Learned timing: only a run that ended ready after a wake request is
+            // remembered; the history is disposable, so a failure is only noted.
+            QString why;
+            if (!timingHistory().record(runProfileName_, *session_->wakeToReadyMs(), QDateTime::currentDateTimeUtc(), &why)) {
+                note(QStringLiteral("Could not remember how long this took: %1").arg(why));
+            }
+        }
         launchedPid = session_->launchedPid();
         runningPid = session_->runningPid();
         launchedClient = session_->launchedClient();
@@ -626,6 +647,10 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
     }
     case Outcome::Cancelled:
         serviceStatus_->setText(QStringLiteral("cancelled"));
+        break;
+    case Outcome::TailscaleOff:
+        serviceStatus_->setText(QStringLiteral("not checked: Tailscale is off on this Mac"));
+        showExplanation(summary, false);
         break;
     }
     notifyRunEnded(outcome, summary);
@@ -898,6 +923,10 @@ void MainWindow::notifyRunEnded(Outcome outcome, const QString& summary) {
         title = QStringLiteral("%1 is ready, but the client did not open").arg(name);
         body = oneSentence(QStringLiteral("The service answered, but the client could not be opened: %1").arg(summary));
         break;
+    case Outcome::TailscaleOff:
+        title = QStringLiteral("%1 cannot be reached").arg(name);
+        body = summary;
+        break;
     case Outcome::Cancelled:
         return;
     }
@@ -911,9 +940,23 @@ void MainWindow::onNotificationsRefused() {
     note(QStringLiteral("Notifications are switched off for WakeDeck (System Settings ▸ Notifications)"));
 }
 
+TimingHistory MainWindow::timingHistory() const {
+    return TimingHistory(TimingHistory::pathBeside(store_.path()));
+}
+
 qint64 MainWindow::typicalWaitMs(const Profile& profile) const {
-    Q_UNUSED(profile);
-    return 0;  // unknown until WakeDeck learns how long this computer takes
+    const auto learned = timingHistory().learned(profile.name);
+    return learned ? learned->typicalMs : 0;  // 0: not learned yet
+}
+
+void MainWindow::forgetHistory(const QString& name) {
+    QString why;
+    if (!timingHistory().remove(name, &why)) note(QStringLiteral("Could not remove the timing history of %1: %2").arg(name, why));
+}
+
+void MainWindow::moveHistory(const QString& from, const QString& to) {
+    QString why;
+    if (!timingHistory().rename(from, to, &why)) note(QStringLiteral("Could not move the timing history to %1: %2").arg(to, why));
 }
 
 void MainWindow::startProgress() {

@@ -10,6 +10,7 @@
 #include "engine/Explain.h"
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
+#include "engine/TimingHistory.h"
 
 namespace wakedeck::cli {
 namespace {
@@ -116,6 +117,11 @@ int remove(const ProfileStore& store, const QString& name) {
     if (!removeProfile(profiles, name)) return problem(QStringLiteral("profile \"%1\" not found in %2").arg(name, store.path()));
     if (const int rc = saveOrExplain(store, profiles)) return rc;
     std::cout << "Removed profile \"" << text(name) << "\" from " << text(store.path()) << "\n";
+    // Its learned timing goes with it; the history is disposable, so a failure only warns.
+    QString error;
+    if (!TimingHistory(TimingHistory::pathBeside(store.path())).remove(name, &error)) {
+        std::cerr << "warning: could not remove its timing history: " << text(error) << "\n";
+    }
     return 0;
 }
 

@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "SystemServices.h"
+#include "engine/Tailscale.h"
 
 namespace wakedeck::app {
 namespace {
@@ -39,6 +40,24 @@ QString notificationPermission() {
         loop.exec();
     }
     return answer->isEmpty() ? QStringLiteral("unavailable") : *answer;
+}
+
+// Tailscale's own status, read the way a run reads it (same tool, same limit).
+// Only the state and the number of devices are reported: no names, no addresses.
+TailscaleStatus tailscaleStatus() {
+    TailscaleStatus result;
+    bool done = false;
+    QEventLoop loop;
+    auto* reader = makeTailscaleReader(nullptr);
+    QObject::connect(reader, &TailscaleReader::finished, &loop, [&](const TailscaleStatus& status) {
+        result = status;
+        done = true;
+        loop.quit();
+    });
+    reader->start();
+    if (!done) loop.exec();  // the reader always finishes, at the latest at its limit
+    delete reader;
+    return result;
 }
 
 }  // namespace
@@ -71,6 +90,12 @@ int runDiagnose(const QString& path) {
     lines << QStringLiteral("dockTile=%1").arg(systemServicesAvailable() && platform::dockTileAvailable()
                                                    ? QStringLiteral("available")
                                                    : QStringLiteral("unavailable"));
+    const QString tailscaleCli = findTailscaleCli();
+    const TailscaleStatus tailscale = tailscaleStatus();
+    lines << QStringLiteral("tailscaleCli=%1").arg(tailscaleCli.isEmpty() ? QStringLiteral("not found") : tailscaleCli);
+    lines << QStringLiteral("tailscaleState=%1")
+                 .arg(tailscale.available ? tailscale.backendState : QStringLiteral("error: %1").arg(tailscale.error));
+    lines << QStringLiteral("tailscalePeers=%1").arg(tailscale.peers.size());
 
     QFile out(file);
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

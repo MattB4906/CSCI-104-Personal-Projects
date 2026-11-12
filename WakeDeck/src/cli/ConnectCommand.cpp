@@ -13,6 +13,8 @@
 #include "engine/ProfileStore.h"
 #include "engine/ServiceProbe.h"
 #include "engine/Session.h"
+#include "engine/Tailscale.h"
+#include "engine/TimingHistory.h"
 
 namespace wakedeck::cli {
 namespace {
@@ -28,7 +30,9 @@ void printCheckUsage(std::ostream& out) {
            "  wakedeck-cli check --host <host> [--port 47989] [--kind sunshine|tcp] [--timeout-ms 2000]\n"
            "\n"
            "Asks once whether the service answers. sunshine: GET /serverinfo over HTTP and read\n"
-           "Sunshine's state. tcp: a plain connection to the port.\n"
+           "Sunshine's state. tcp: a plain connection to the port. When the service is not ready and\n"
+           "the host looks like a Tailscale address, one more line says what Tailscale on this Mac\n"
+           "shows (read with Tailscale's own `status --json`).\n"
            "\n"
            "Exit codes: 0 ready, 1 usage error, 2 not ready (the output says what was observed).\n";
 }
@@ -53,8 +57,14 @@ void printConnectUsage(std::ostream& out) {
            "--timeout-s may be given alongside it. --client-args is split on spaces; client paths must\n"
            "be absolute.\n"
            "\n"
+           "For a Tailscale host (100.64.0.0/10 or *.ts.net) it first reads Tailscale's own status on\n"
+           "this Mac: when Tailscale is not connected it stops at once (exit code 6). With --profile it\n"
+           "also says how long the computer usually takes, and remembers how long it took this time\n"
+           "in the history file beside the profiles store.\n"
+           "\n"
            "Exit codes: 0 ready and client launched, 1 usage error, 2 timed out or profile not found,\n"
-           "            3 wake request failed, 4 client not found or not launched.\n";
+           "            3 wake request failed, 4 client not found or not launched,\n"
+           "            6 Tailscale is not connected on this Mac.\n";
 }
 
 int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
@@ -83,7 +93,18 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
         }
         std::cout << " after " << result.elapsedMs << " ms" << std::endl;
         exitCode = result.ready() ? 0 : 2;
-        app.quit();
+        if (result.ready() || !looksLikeTailscale(target->host)) {
+            app.quit();
+            return;
+        }
+        // Not ready on a Tailscale host: one more line with what Tailscale shows.
+        TailscaleReader* reader = makeTailscaleReader(&app);
+        QObject::connect(reader, &TailscaleReader::finished, &app, [&app, host = target->host](const TailscaleStatus& status) {
+            const QString line = describeTailscale(status, host);
+            if (!line.isEmpty()) std::cout << line.toStdString() << std::endl;
+            app.quit();
+        });
+        reader->start();
     });
     // Start from inside the event loop: a probe that fails synchronously would
     // otherwise call quit() before exec() begins, and exec() would never return.
@@ -109,6 +130,7 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
     SessionConfig config;
     ClientConfig client;
     QString profileName;
+    QString historyPath;  // set for --profile: runs that end ready after a wake are recorded there
     if (flags.has("--profile")) {
         if (hasCheckOrWakeFlags(flags) || hasClientFlags(flags)) {
             return usageError("with --profile only --poll-s and --timeout-s may be given; the rest comes from the profile",
@@ -132,6 +154,8 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
         }
         profileName = profile->name;  // as saved, not as typed
         config = profile->toSessionConfig();
+        historyPath = TimingHistory::pathBeside(store.path());
+        config.learned = TimingHistory(historyPath).learned(profileName);
         client = profile->client;
         if (!applyTimingOverrides(flags, config, error)) return usageError(error, printConnectUsage);
     } else {
@@ -155,6 +179,12 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
     });
     QObject::connect(&session, &Session::finished, &app, [&](Outcome outcome, const QString& summary) {
         std::cout << "\nResult: " << outcomeName(outcome).toStdString() << "\n" << summary.toStdString() << std::endl;
+        if (outcome == Outcome::ReadyAfterWake && !historyPath.isEmpty() && session.wakeToReadyMs()) {
+            QString error;
+            if (!TimingHistory(historyPath).record(profileName, *session.wakeToReadyMs(), QDateTime::currentDateTimeUtc(), &error)) {
+                std::cerr << "warning: could not remember how long this took: " << error.toStdString() << "\n";
+            }
+        }
         switch (outcome) {
         case Outcome::ReadyWithoutWake:
         case Outcome::ReadyAfterWake: exitCode = 0; break;
@@ -162,6 +192,7 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
         case Outcome::WakeFailed: exitCode = 3; break;
         case Outcome::LaunchFailed: exitCode = 4; break;
         case Outcome::Cancelled: exitCode = 5; break;
+        case Outcome::TailscaleOff: exitCode = 6; break;
         }
         app.quit();
     });
