@@ -5,22 +5,29 @@
 // and launcher; the window only displays what they report.
 #pragma once
 
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <QString>
 #include <QStringList>
 #include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
+#include "SystemServices.h"
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
 #include "engine/Session.h"
 
 class QAction;
+class QCloseEvent;
+class QFormLayout;
 class QLabel;
 class QListWidget;
 class QPlainTextEdit;
+class QProgressBar;
 class QPushButton;
+class QTimer;
 class QWidget;
 
 namespace wakedeck {
@@ -60,6 +67,29 @@ public:
     qint64 watchedClientPid() const;  // 0 when not watching
     qint64 ownedClientPid() const;    // the live client process WakeDeck itself started, or 0
 
+    // The "ready" notification and the Dock progress. The defaults are the
+    // system's on macOS (cocoa) and do nothing elsewhere; tests hand in fakes.
+    // The predicate says whether WakeDeck is the active application (default:
+    // QGuiApplication::applicationState() == Qt::ApplicationActive).
+    ~MainWindow() override;
+    void setNotifier(std::unique_ptr<Notifier> notifier);
+    void setDockProgress(std::unique_ptr<DockProgress> dock);
+    using ActivePredicate = std::function<bool()>;
+    void setAppActivePredicate(ActivePredicate isActive) { isAppActive_ = std::move(isActive); }
+
+    // "Notify When Ready" (Run menu): on by default, remembered with QSettings
+    // under kNotifyWhenReadyKey. When a Wake & Connect run ends (ready, timed
+    // out, wake failed, client not opened) while WakeDeck is not the active
+    // application, one notification and a Dock bounce say so.
+    static constexpr const char* kNotifyWhenReadyKey = "notifyWhenReady";
+    bool notifyWhenReady() const;
+    void setNotifyWhenReady(bool on);
+
+    // The wait progress in the "This run" box (and on the Dock icon).
+    bool progressVisible() const;
+    QString progressText() const;
+    int progressPermille() const;  // the bar's value, 0 to 1000
+
     // State, for tests and scripting.
     const std::vector<Profile>& profiles() const { return profiles_; }
     const Profile* currentProfile() const;
@@ -94,6 +124,7 @@ signals:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
 
 private:
     void buildUi();
@@ -126,6 +157,15 @@ private:
     void showAbout();
     bool saveProfiles(QString* error);
     void showError(const QString& title, const QString& text);
+    void notifyRunEnded(Outcome outcome, const QString& summary);  // the "ready" notification, when it applies
+    void onNotificationsRefused();
+    void startProgress();
+    void updateProgress();
+    void stopProgress();
+    // How long this computer usually takes to answer after the wait begins, in
+    // ms; 0 = unknown, which makes the progress run against the time limit.
+    // Phase "timing" (learned timing) supplies the real value here.
+    qint64 typicalWaitMs(const Profile& profile) const;
 
     ProfileStore store_;
     FactoriesFor factoriesFor_;
@@ -167,6 +207,22 @@ private:
     QPlainTextEdit* explanation_ = nullptr;
     QPushButton* locateButton_ = nullptr;
     QPushButton* tryAgainButton_ = nullptr;
+
+    // Notification and progress.
+    std::unique_ptr<Notifier> notifier_;
+    std::unique_ptr<DockProgress> dock_;
+    ActivePredicate isAppActive_;
+    QAction* notifyWhenReadyAction_ = nullptr;
+    bool refusalNoted_ = false;      // the "switched off" line is shown once per launch (one window per launch)
+    QFormLayout* factsLayout_ = nullptr;
+    QWidget* progressRow_ = nullptr;
+    QProgressBar* progressBar_ = nullptr;
+    QLabel* progressLabel_ = nullptr;
+    QTimer* progressTimer_ = nullptr;
+    QElapsedTimer waitClock_;        // valid while the progress is shown
+    bool progressStartedThisRun_ = false;  // shown once per run; closing the window ends it for good
+    qint64 progressTypicalMs_ = 0;
+    qint64 progressLimitMs_ = 0;     // the run's limit, plus "Keep waiting"
 };
 
 }  // namespace wakedeck::app

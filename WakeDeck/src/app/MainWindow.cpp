@@ -9,6 +9,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -16,6 +17,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSettings>
 #include <QShowEvent>
@@ -26,6 +28,7 @@
 #include <utility>
 
 #include "ProfileEditorDialog.h"
+#include "WaitProgress.h"
 #include "engine/ClientLauncher.h"
 #include "engine/Explain.h"
 #include "engine/ProcessWatcher.h"
@@ -39,6 +42,13 @@ constexpr const char* kExampleResource = ":/examples/example-profile.json";
 
 QString stamp(const QDateTime& at) {
     return at.toString(QStringLiteral("HH:mm:ss"));
+}
+
+// The first line of a run's text as one sentence, for a notification.
+QString oneSentence(const QString& text) {
+    QString line = text.section(QLatin1Char('\n'), 0, 0).trimmed();
+    if (!line.isEmpty() && !line.endsWith(QLatin1Char('.'))) line += QLatin1Char('.');
+    return line;
 }
 
 }  // namespace
@@ -57,6 +67,9 @@ MainWindow::MainWindow(ProfileStore store, FactoriesFor factoriesFor, QWidget* p
         // Queued, so the timeline line and the current signal finish first.
         QTimer::singleShot(0, QCoreApplication::instance(), [] { QCoreApplication::quit(); });
     };
+    setNotifier(makeDefaultNotifier());
+    setDockProgress(makeDefaultDockProgress());
+    isAppActive_ = [] { return QGuiApplication::applicationState() == Qt::ApplicationActive; };
     clientWatcher_ = new ProcessWatcher(this);
     connect(clientWatcher_, &ProcessWatcher::exited, this, &MainWindow::onClientExited);
     setWindowTitle(QStringLiteral("WakeDeck"));
@@ -177,6 +190,24 @@ void MainWindow::buildUi() {
     serviceStatus_->setWordWrap(true);
     factsLayout->addRow(QStringLiteral("Wake request:"), wakeStatus_);
     factsLayout->addRow(QStringLiteral("Service:"), serviceStatus_);
+    // The wait progress: shown while the run is waking or waiting for the service.
+    factsLayout_ = factsLayout;
+    progressRow_ = new QWidget(facts);
+    auto* progressLayout = new QHBoxLayout(progressRow_);
+    progressLayout->setContentsMargins(0, 0, 0, 0);
+    progressBar_ = new QProgressBar(progressRow_);
+    progressBar_->setObjectName(QStringLiteral("waitProgress"));
+    progressBar_->setRange(0, 1000);
+    progressBar_->setTextVisible(false);
+    progressLabel_ = new QLabel(progressRow_);
+    progressLabel_->setObjectName(QStringLiteral("waitProgressText"));
+    progressLayout->addWidget(progressBar_, 1);
+    progressLayout->addWidget(progressLabel_);
+    factsLayout->addRow(QStringLiteral("Waiting:"), progressRow_);
+    factsLayout->setRowVisible(progressRow_, false);
+    progressTimer_ = new QTimer(this);
+    progressTimer_->setInterval(1000);
+    connect(progressTimer_, &QTimer::timeout, this, &MainWindow::updateProgress);
     detailsLayout->addWidget(facts);
 
     timeline_ = new QListWidget(details_);
@@ -249,6 +280,15 @@ void MainWindow::buildMenus() {
         QStringLiteral("When the client WakeDeck opened closes, for example because the stream ended, WakeDeck quits too. "
                        "A client you opened yourself is never watched."));
     connect(quitWhenClientClosesAction_, &QAction::toggled, this, &MainWindow::onQuitOptionToggled);
+    notifyWhenReadyAction_ = run->addAction(QStringLiteral("&Notify When Ready"));
+    notifyWhenReadyAction_->setObjectName(QStringLiteral("notifyWhenReadyAction"));
+    notifyWhenReadyAction_->setCheckable(true);
+    notifyWhenReadyAction_->setChecked(QSettings().value(QLatin1String(kNotifyWhenReadyKey), true).toBool());
+    notifyWhenReadyAction_->setToolTip(
+        QStringLiteral("When a Wake & Connect run ends while you are in another application, a notification says how it "
+                       "ended and the Dock icon bounces."));
+    connect(notifyWhenReadyAction_, &QAction::toggled, this,
+            [](bool on) { QSettings().setValue(QLatin1String(kNotifyWhenReadyKey), on); });
 
     QMenu* help = menuBar()->addMenu(QStringLiteral("&Help"));
     help->addAction(QStringLiteral("How Waking &Works"), this, &MainWindow::showHowWakingWorks);
@@ -546,6 +586,7 @@ void MainWindow::onSessionEvent(const TimelineEvent& event) {
 
 void MainWindow::onSessionState(SessionState state) {
     keepWaitingButton_->setVisible(state == SessionState::Waiting);
+    if (state == SessionState::Waking || state == SessionState::Waiting) startProgress();  // once per run
 }
 
 void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
@@ -559,6 +600,8 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
         session_->deleteLater();
         session_ = nullptr;
     }
+    stopProgress();
+    progressStartedThisRun_ = false;
     setRunning(false);
     switch (outcome) {
     case Outcome::ReadyWithoutWake:
@@ -585,6 +628,7 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
         serviceStatus_->setText(QStringLiteral("cancelled"));
         break;
     }
+    notifyRunEnded(outcome, summary);
     emit runFinished(outcome);
 }
 
@@ -769,6 +813,10 @@ void MainWindow::keepWaiting() {
         note.at = QDateTime::currentDateTime();
         note.text = QStringLiteral("Waiting one more minute");
         appendTimeline(note);
+        if (waitClock_.isValid()) {
+            progressLimitMs_ += 60000;
+            updateProgress();
+        }
     }
 }
 
@@ -792,6 +840,122 @@ void MainWindow::locateClient() {
         note.text = QStringLiteral("Client path saved: %1. Use Open client to try it.").arg(chosen);
         appendTimeline(note);
     }
+}
+
+// ---- Notification and progress ------------------------------------------------
+
+MainWindow::~MainWindow() {
+    stopProgress();  // the Dock icon goes back to normal with the window
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    stopProgress();
+    QMainWindow::closeEvent(event);
+}
+
+void MainWindow::setNotifier(std::unique_ptr<Notifier> notifier) {
+    notifier_ = notifier ? std::move(notifier) : std::make_unique<NoNotifier>();
+    connect(notifier_.get(), &Notifier::refused, this, &MainWindow::onNotificationsRefused);
+}
+
+void MainWindow::setDockProgress(std::unique_ptr<DockProgress> dock) {
+    if (dock_ && waitClock_.isValid()) dock_->clear();
+    dock_ = dock ? std::move(dock) : std::make_unique<NoDockProgress>();
+    if (waitClock_.isValid()) updateProgress();
+}
+
+bool MainWindow::notifyWhenReady() const {
+    return notifyWhenReadyAction_->isChecked();
+}
+
+void MainWindow::setNotifyWhenReady(bool on) {
+    notifyWhenReadyAction_->setChecked(on);  // toggled() saves it
+}
+
+void MainWindow::notifyRunEnded(Outcome outcome, const QString& summary) {
+    if (!notifyWhenReady() || (isAppActive_ && isAppActive_())) return;
+    const QString name = runProfileName_;
+    QString title;
+    QString body;
+    switch (outcome) {
+    case Outcome::ReadyWithoutWake:
+    case Outcome::ReadyAfterWake:
+        title = QStringLiteral("%1 is ready").arg(name);
+        body = oneSentence(summary);
+        break;
+    case Outcome::TimedOut: {
+        const Profile* profile = runProfile();
+        title = QStringLiteral("%1 did not answer").arg(name);
+        body = profile ? QStringLiteral("No answer from %1 within %2.").arg(describe(profile->check), formatDuration(static_cast<int>(progressLimitMs_)))
+                       : QStringLiteral("No answer within the time limit.");
+        break;
+    }
+    case Outcome::WakeFailed:
+        title = QStringLiteral("Could not wake %1").arg(name);
+        body = oneSentence(summary);
+        break;
+    case Outcome::LaunchFailed:
+        title = QStringLiteral("%1 is ready, but the client did not open").arg(name);
+        body = oneSentence(QStringLiteral("The service answered, but the client could not be opened: %1").arg(summary));
+        break;
+    case Outcome::Cancelled:
+        return;
+    }
+    notifier_->notify(title, body);
+    QApplication::alert(this);
+}
+
+void MainWindow::onNotificationsRefused() {
+    if (refusalNoted_) return;
+    refusalNoted_ = true;
+    note(QStringLiteral("Notifications are switched off for WakeDeck (System Settings ▸ Notifications)"));
+}
+
+qint64 MainWindow::typicalWaitMs(const Profile& profile) const {
+    Q_UNUSED(profile);
+    return 0;  // unknown until WakeDeck learns how long this computer takes
+}
+
+void MainWindow::startProgress() {
+    if (waitClock_.isValid() || progressStartedThisRun_) return;
+    progressStartedThisRun_ = true;
+    const Profile* profile = runProfile();
+    progressTypicalMs_ = profile ? typicalWaitMs(*profile) : 0;
+    progressLimitMs_ = profile ? profile->overallTimeoutMs : 0;
+    waitClock_.start();
+    factsLayout_->setRowVisible(progressRow_, true);
+    progressTimer_->start();
+    updateProgress();
+}
+
+void MainWindow::updateProgress() {
+    if (!waitClock_.isValid()) return;
+    const WaitProgress progress = waitProgress(waitClock_.elapsed(), progressTypicalMs_, progressLimitMs_);
+    progressBar_->setValue(qRound(progress.fraction * 1000.0));
+    progressLabel_->setText(progress.text);
+    dock_->setProgress(progress.fraction);
+}
+
+void MainWindow::stopProgress() {
+    if (progressTimer_) progressTimer_->stop();
+    if (!waitClock_.isValid()) return;
+    waitClock_.invalidate();
+    factsLayout_->setRowVisible(progressRow_, false);
+    progressBar_->setValue(0);
+    progressLabel_->clear();
+    dock_->clear();
+}
+
+bool MainWindow::progressVisible() const {
+    return waitClock_.isValid() && !progressRow_->isHidden();
+}
+
+QString MainWindow::progressText() const {
+    return progressLabel_->text();
+}
+
+int MainWindow::progressPermille() const {
+    return progressBar_->value();
 }
 
 // ---- State for tests ----------------------------------------------------------
