@@ -31,6 +31,18 @@ QString outcomeName(Outcome outcome) {
     return QStringLiteral("cancelled");
 }
 
+QString ordinal(int n) {
+    const int lastTwo = n % 100;
+    const int last = n % 10;
+    const char* suffix = "th";
+    if (lastTwo < 11 || lastTwo > 13) {
+        if (last == 1) suffix = "st";
+        if (last == 2) suffix = "nd";
+        if (last == 3) suffix = "rd";
+    }
+    return QString::number(n) + QLatin1String(suffix);
+}
+
 void NoLauncher::start() {
     QTimer::singleShot(0, this, [this] {
         emit finished(true, QStringLiteral("No client configured for this computer; nothing launched."));
@@ -138,7 +150,9 @@ void Session::scheduleNextCheck() {
 }
 
 void Session::sendWake() {
-    setState(SessionState::Waking);
+    // The first request moves the run to Waking; a resend happens while it
+    // waits, and the checks go on meanwhile.
+    if (!wakeSent_) setState(SessionState::Waking);
     waker_ = factories_.waker(*config_.wake, this);
     connect(waker_, &Waker::finished, this, &Session::onWakeFinished);
     waker_->start();
@@ -151,20 +165,52 @@ void Session::onWakeFinished(bool allSent, const QString& summary) {
     }
     if (finished_) return;
 
+    const bool resend = wakeSent_;  // the first request already went out
     if (!allSent) {
+        if (resend) {
+            // The first request did leave this Mac; a failed repeat does not end the run.
+            emitEvent(EventKind::Failure, QStringLiteral("Could not send the wake request again: %1").arg(summary));
+            scheduleResend();
+            return;
+        }
         emitEvent(EventKind::Failure, QStringLiteral("Wake request failed: %1").arg(summary));
         finish(Outcome::WakeFailed, QStringLiteral("The wake request could not be sent: %1").arg(summary));
         return;
     }
+    const QDateTime now = QDateTime::currentDateTime();
+    ++observations_.wakeSends;
+    observations_.lastWakeAt = now;
+    observations_.wakeSummary = summary;
+    if (resend) {
+        emitEvent(EventKind::WakeSent, QStringLiteral("Wake request sent again (%1 time): %2")
+                                           .arg(ordinal(observations_.wakeSends), summary));
+        scheduleResend();
+        return;
+    }
     wakeSent_ = true;
     observations_.wakeSent = true;
-    observations_.wakeAt = QDateTime::currentDateTime();
-    observations_.wakeSummary = summary;
+    observations_.wakeAt = now;
     emitEvent(EventKind::WakeSent, QStringLiteral("Wake request sent: %1").arg(summary));
     emitEvent(EventKind::Info, QStringLiteral("Waiting for %1 (up to %2)")
                                    .arg(describe(config_.check), formatDuration(config_.overallTimeoutMs)));
     setState(SessionState::Waiting);
     scheduleNextCheck();
+    scheduleResend();
+}
+
+void Session::scheduleResend() {
+    // Measured from the end of the previous send, and never while one is in flight.
+    if (finished_ || !config_.wake || config_.resendIntervalMs <= 0) return;
+    if (state_ != SessionState::Waiting || waker_) return;
+    if (!resendTimer_) {
+        resendTimer_ = new QTimer(this);
+        resendTimer_->setSingleShot(true);
+        connect(resendTimer_, &QTimer::timeout, this, [this] {
+            if (finished_ || state_ != SessionState::Waiting || waker_) return;
+            sendWake();
+        });
+    }
+    resendTimer_->start(config_.resendIntervalMs);
 }
 
 void Session::launch() {
@@ -206,6 +252,7 @@ void Session::onLaunchFinished(bool ok, const QString& summary) {
 void Session::finish(Outcome outcome, const QString& summary) {
     if (finished_) return;
     finished_ = true;
+    if (resendTimer_) resendTimer_->stop();
     const bool good = outcome == Outcome::ReadyWithoutWake || outcome == Outcome::ReadyAfterWake;
     setState(good ? SessionState::Done : SessionState::Failed);
     emit finished(outcome, summary);

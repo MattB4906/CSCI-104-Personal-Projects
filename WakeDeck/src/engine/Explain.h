@@ -20,8 +20,10 @@ struct Observations {
     ProbeTarget check;
     bool wakeConfigured = false;
     bool wakeSent = false;
-    QDateTime wakeAt;
-    QString wakeSummary;
+    QDateTime wakeAt;      // the first wake request that was sent
+    QString wakeSummary;   // what the last one sent
+    int wakeSends = 0;     // wake requests sent in full, the first one included
+    QDateTime lastWakeAt;  // the last of them (equal to wakeAt after one)
     std::vector<Observation> checks;
     int elapsedMs = 0;
 };

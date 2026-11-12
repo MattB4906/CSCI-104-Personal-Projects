@@ -18,11 +18,17 @@
 #include "QtWaker.h"
 #include "ServiceProbe.h"
 
+class QTimer;
+
 namespace wakedeck {
 
 struct SessionConfig {
     ProbeTarget check;
     std::optional<WakeConfig> wake;  // std::nullopt: never send a wake request
+    // While waiting after a wake request, send the whole request again this long
+    // after the previous send ended; 0 sends it once. Profiles set it from
+    // WakeConfig::resendSeconds; milliseconds so tests can use small values.
+    int resendIntervalMs = 0;
     int pollIntervalMs = 3000;
     int overallTimeoutMs = 120000;
 };
@@ -107,6 +113,7 @@ private:
     void scheduleNextCheck();
     void sendWake();
     void onWakeFinished(bool allSent, const QString& summary);
+    void scheduleResend();
     void launch();
     void onLaunchFinished(bool ok, const QString& summary);
     void finish(Outcome outcome, const QString& summary);
@@ -126,6 +133,10 @@ private:
     Probe* probe_ = nullptr;
     Waker* waker_ = nullptr;
     Launcher* launcher_ = nullptr;
+    QTimer* resendTimer_ = nullptr;  // single shot; armed only while waiting with no waker in flight
 };
+
+// "1st", "2nd", "3rd", "4th", "11th", "21st"
+QString ordinal(int n);
 
 }  // namespace wakedeck

@@ -42,7 +42,13 @@ QString explainTimeout(const Observations& o) {
     if (!o.checks.empty() && !o.checks.back().result.detail.isEmpty()) {
         lines << QStringLiteral("  Last answer: %1.").arg(o.checks.back().result.detail);
     }
-    if (o.wakeSent) {
+    if (o.wakeSent && o.wakeSends > 1) {
+        lines << QStringLiteral("- Wake request sent %1 times between %2 and %3: %4. That confirms the packets left this "
+                                "computer, not that the PC received them.")
+                     .arg(o.wakeSends)
+                     .arg(o.wakeAt.toString(QStringLiteral("HH:mm:ss")), o.lastWakeAt.toString(QStringLiteral("HH:mm:ss")),
+                          o.wakeSummary);
+    } else if (o.wakeSent) {
         lines << QStringLiteral("- Wake request sent at %1: %2. That confirms the packets left this computer, "
                                 "not that the PC received them.")
                      .arg(o.wakeAt.toString(QStringLiteral("HH:mm:ss")), o.wakeSummary);
