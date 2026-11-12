@@ -301,9 +301,12 @@ void MainWindow::reloadFromStore() {
     const ProfileStore::LoadResult loaded = store_.load();
     QString warning;
     if (!loaded.ok) {
+        // The file is still there and was not read: it must not be replaced.
         warning = loaded.error;
+        storeRefusal_ = loaded.error;
         profiles_.clear();
     } else {
+        storeRefusal_.clear();
         profiles_ = loaded.profiles;
         warning = loaded.warning;
     }
@@ -377,6 +380,14 @@ int MainWindow::listCount() const {
     return list_->count();
 }
 
+bool MainWindow::storeWritable(QString* error) {
+    if (storeRefusal_.isEmpty()) return true;
+    const QString why = QStringLiteral("Nothing was changed, because the saved computers could not be read: %1").arg(storeRefusal_);
+    if (error) *error = why;
+    showError(QStringLiteral("Could not save the computers"), why);
+    return false;
+}
+
 bool MainWindow::saveProfiles(QString* error) {
     QString why;
     if (!store_.save(profiles_, &why)) {
@@ -389,6 +400,7 @@ bool MainWindow::saveProfiles(QString* error) {
 }
 
 bool MainWindow::addProfile(Profile profile, QString* error) {
+    if (!storeWritable(error)) return false;
     const QString name = profile.name;
     upsertProfile(profiles_, std::move(profile));
     if (!saveProfiles(error)) return false;
@@ -399,7 +411,7 @@ bool MainWindow::addProfile(Profile profile, QString* error) {
 
 bool MainWindow::removeCurrentProfile(QString* error) {
     const Profile* profile = currentProfile();
-    if (!profile) return false;
+    if (!profile || !storeWritable(error)) return false;
     const QString name = profile->name;  // a copy: the element itself is about to go
     removeProfile(profiles_, name);
     if (!saveProfiles(error)) return false;
@@ -409,6 +421,7 @@ bool MainWindow::removeCurrentProfile(QString* error) {
 }
 
 bool MainWindow::loadExample(QString* error) {
+    if (!storeWritable(error)) return false;
     QString why;
     const auto example = ProfileStore::readProfileFile(QLatin1String(kExampleResource), &why);
     if (!example) {
@@ -428,6 +441,7 @@ void MainWindow::selectProfile(const QString& name) {
 }
 
 void MainWindow::addNew() {
+    if (!storeWritable(nullptr)) return;
     Profile blank;
     ProfileEditorDialog dialog(blank, true, this);
     if (dialog.exec() == QDialog::Accepted) addProfile(dialog.result());
@@ -452,6 +466,7 @@ void MainWindow::editCurrent() {
 }
 
 bool MainWindow::updateProfile(const QString& oldName, Profile edited, QString* error) {
+    if (!storeWritable(error)) return false;
     const QString newName = edited.name;
     const bool renamed = !sameProfileName(newName, oldName);
     if (renamed) {
@@ -472,6 +487,7 @@ void MainWindow::deleteCurrent() {
 }
 
 void MainWindow::importProfile() {
+    if (!storeWritable(nullptr)) return;
     const QString file = QFileDialog::getOpenFileName(this, QStringLiteral("Import a profile"), QString(),
                                                       QStringLiteral("WakeDeck profiles (*.json);;All files (*)"));
     if (file.isEmpty()) return;
@@ -559,6 +575,9 @@ void MainWindow::startWakeAndConnect() {
     stopWatchingClient();  // a new run: the previous client no longer quits WakeDeck
     runProfileName_ = profile->name;
     resetRunDisplay();
+    activeAtReady_.reset();
+    runClock_.start();
+    firstWakeClock_.invalidate();
     serviceStatus_->setText(QStringLiteral("checking…"));
     SessionConfig config = profile->toSessionConfig();
     config.learned = timingHistory().learned(profile->name);
@@ -576,6 +595,7 @@ void MainWindow::onSessionEvent(const TimelineEvent& event) {
     switch (event.kind) {
     case EventKind::WakeSent:
         ++wakeSendCount_;
+        if (!firstWakeClock_.isValid()) firstWakeClock_.start();
         if (wakeSendCount_ > 1) {
             // Resent while waiting: how often, and when the last one left.
             wakeStatus_->setText(QStringLiteral("sent %1 times, last at %2 (%3)")
@@ -587,6 +607,9 @@ void MainWindow::onSessionEvent(const TimelineEvent& event) {
         break;
     case EventKind::Ready:
         serviceStatus_->setText(QStringLiteral("ready at %1").arg(stamp(event.at)));
+        // Before the client opens and takes the focus: whether WakeDeck was in
+        // front decides the notification for the outcomes that follow.
+        activeAtReady_ = isAppActive_ && isAppActive_();
         break;
     case EventKind::Info:
         if (event.text.startsWith(QLatin1String("Not ready")) || event.text.startsWith(QLatin1String("Check "))) {
@@ -898,7 +921,13 @@ void MainWindow::setNotifyWhenReady(bool on) {
 }
 
 void MainWindow::notifyRunEnded(Outcome outcome, const QString& summary) {
-    if (!notifyWhenReady() || (isAppActive_ && isAppActive_())) return;
+    if (!notifyWhenReady()) return;
+    // A ready service is judged by the moment it answered (the client opened
+    // afterwards takes the focus); every other ending by the state now.
+    const bool afterReady =
+        outcome == Outcome::ReadyWithoutWake || outcome == Outcome::ReadyAfterWake || outcome == Outcome::LaunchFailed;
+    const bool active = afterReady && activeAtReady_ ? *activeAtReady_ : (isAppActive_ && isAppActive_());
+    if (active) return;
     const QString name = runProfileName_;
     QString title;
     QString body;
@@ -973,7 +1002,12 @@ void MainWindow::startProgress() {
 
 void MainWindow::updateProgress() {
     if (!waitClock_.isValid()) return;
-    const WaitProgress progress = waitProgress(waitClock_.elapsed(), progressTypicalMs_, progressLimitMs_);
+    // Without a learned time the bar runs against the limit, which counts from
+    // the start of the run; with one, from the first wake request, as the
+    // history measures it.
+    qint64 elapsed = runClock_.isValid() ? runClock_.elapsed() : waitClock_.elapsed();
+    if (progressTypicalMs_ > 0) elapsed = firstWakeClock_.isValid() ? firstWakeClock_.elapsed() : 0;
+    const WaitProgress progress = waitProgress(elapsed, progressTypicalMs_, progressLimitMs_);
     progressBar_->setValue(qRound(progress.fraction * 1000.0));
     progressLabel_->setText(progress.text);
     dock_->setProgress(progress.fraction);
@@ -987,6 +1021,10 @@ void MainWindow::stopProgress() {
     progressBar_->setValue(0);
     progressLabel_->clear();
     dock_->clear();
+}
+
+void MainWindow::setProgressIntervalMs(int ms) {
+    progressTimer_->setInterval(ms > 0 ? ms : 1000);
 }
 
 bool MainWindow::progressVisible() const {

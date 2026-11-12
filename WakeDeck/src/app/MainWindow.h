@@ -11,6 +11,7 @@
 #include <QStringList>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -86,7 +87,9 @@ public:
     bool notifyWhenReady() const;
     void setNotifyWhenReady(bool on);
 
-    // The wait progress in the "This run" box (and on the Dock icon).
+    // The wait progress in the "This run" box (and on the Dock icon). It is
+    // updated every second; tests may shorten that.
+    void setProgressIntervalMs(int ms);
     bool progressVisible() const;
     QString progressText() const;
     int progressPermille() const;  // the bar's value, 0 to 1000
@@ -97,6 +100,10 @@ public:
     // True while a Wake & Connect run or a single step (check, wake, open) is in flight.
     bool isRunning() const { return session_ != nullptr || stepInFlight_; }
     int listCount() const;
+    // Set when the profiles file could not be loaded and was left in place (for
+    // example written by a newer WakeDeck): nothing is written to it then, and
+    // every change is refused with this explanation, until a load succeeds.
+    QString storeRefusal() const { return storeRefusal_; }
     QString pendingWarningText() const { return pendingWarnings_; }
     QStringList timelineTexts() const;
     QString wakeStatusText() const;
@@ -163,6 +170,7 @@ private:
     void showHowWakingWorks();
     void showAbout();
     bool saveProfiles(QString* error);
+    bool storeWritable(QString* error);  // false (and says why) while storeRefusal_ is set
     void showError(const QString& title, const QString& text);
     void notifyRunEnded(Outcome outcome, const QString& summary);  // the "ready" notification, when it applies
     void onNotificationsRefused();
@@ -184,6 +192,8 @@ private:
     QString runProfileName_;      // which computer the displayed run belongs to
     int wakeSendCount_ = 0;       // wake requests sent in the displayed run, resends included
     QString pendingWarnings_;     // load warnings to show once the window is visible
+    QString storeRefusal_;        // why the profiles file must not be written (see storeRefusal())
+    std::optional<bool> activeAtReady_;  // was WakeDeck active when the service answered (this run)?
     // Follows the client process WakeDeck itself started last, for as long as it
     // lives, so that a later launch that only finds it running can watch it again.
     ProcessWatcher* clientWatcher_ = nullptr;
@@ -229,6 +239,8 @@ private:
     QLabel* progressLabel_ = nullptr;
     QTimer* progressTimer_ = nullptr;
     QElapsedTimer waitClock_;        // valid while the progress is shown
+    QElapsedTimer runClock_;         // since the Wake & Connect run started (the limit counts from there)
+    QElapsedTimer firstWakeClock_;   // since the run's first wake request (the learned time counts from there)
     bool progressStartedThisRun_ = false;  // shown once per run; closing the window ends it for good
     qint64 progressTypicalMs_ = 0;
     qint64 progressLimitMs_ = 0;     // the run's limit, plus "Keep waiting"

@@ -76,12 +76,13 @@ class FakeLauncher final : public Launcher {
 public:
     // Reports its process ids even when it fails, so the tests show that a
     // failed launch is never watched.
-    FakeLauncher(bool ok, qint64 pid, qint64 runningPid, QObject* parent)
-        : Launcher(parent), ok_(ok), pid_(pid), runningPid_(runningPid) {}
+    FakeLauncher(bool ok, qint64 pid, qint64 runningPid, QObject* parent, std::function<void()> onStart = {})
+        : Launcher(parent), ok_(ok), pid_(pid), runningPid_(runningPid), onStart_(std::move(onStart)) {}
     QString describe() const override { return QStringLiteral("fake client"); }
     qint64 launchedPid() const override { return pid_; }
     qint64 runningPid() const override { return runningPid_ > 0 ? runningPid_ : pid_; }
     void start() override {
+        if (onStart_) onStart_();
         QTimer::singleShot(0, this, [this] {
             emit finished(ok_, ok_ ? QStringLiteral("Launched fake client") : QStringLiteral("the client /nonexistent was not found"));
         });
@@ -91,6 +92,7 @@ private:
     bool ok_;
     qint64 pid_;
     qint64 runningPid_;
+    std::function<void()> onStart_;
 };
 
 struct Script {
@@ -103,6 +105,7 @@ struct Script {
     int probesCreated = 0;
     int wakersCreated = 0;
     QString tailscaleState;  // empty: no Tailscale reader; otherwise its state, with the computer online
+    std::function<void()> onLaunch;  // runs when the fake launcher starts, e.g. a client taking the focus
 };
 
 class FakeTailscaleReader final : public TailscaleReader {
@@ -134,7 +137,7 @@ MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
         if (profile.client.preset == ClientConfig::Preset::None) {
             factories.launcher = [](QObject* parent) -> Launcher* { return new NoLauncher(parent); };
         } else {
-            factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(script->launchOk, script->launchPid, script->runningPid, parent); };
+            factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(script->launchOk, script->launchPid, script->runningPid, parent, script->onLaunch); };
         }
         factories.tailscale = [script](QObject* parent) -> TailscaleReader* {
             if (script->tailscaleState.isEmpty()) return nullptr;
@@ -1148,6 +1151,53 @@ private slots:
         QCOMPARE(log->notifications.size(), std::size_t(1));
     }
 
+    void aReadyRunIsJudgedByTheMomentTheServiceAnswered() {
+        // Review finding B: the client takes the focus before the run ends.
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+
+        // Active when the service answered, inactive at the end: no notification.
+        log->active = true;
+        script->onLaunch = [log] { log->active = false; };
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QVERIFY(!log->active);
+        QVERIFY(log->notifications.empty());
+
+        // Inactive when it answered, active at the end: one notification.
+        log->active = false;
+        script->onLaunch = [log] { log->active = true; };
+        script->probesCreated = 0;
+        outcome.reset();
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QCOMPARE(log->notifications.size(), std::size_t(1));
+        QCOMPARE(log->notifications.front().first, QStringLiteral("PC is ready"));
+
+        // A timeout is judged at the end, as before.
+        script->statuses = {ProbeStatus::TimedOut};
+        script->probesCreated = 0;
+        script->onLaunch = {};
+        log->active = true;
+        Profile slow = sampleProfile(QStringLiteral("PC"), true, true);
+        slow.overallTimeoutMs = 60;
+        QVERIFY(window.addProfile(slow));
+        outcome.reset();
+        QTimer::singleShot(0, &window, [log] { log->active = false; });
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::TimedOut);
+        QCOMPARE(log->notifications.size(), std::size_t(2));
+        QCOMPARE(log->notifications.back().first, QStringLiteral("PC did not answer"));
+    }
+
     void switchedOffNotificationsAreNotedOncePerLaunch() {
         QTemporaryDir dir;
         const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
@@ -1177,12 +1227,13 @@ private slots:
         QTemporaryDir dir;
         const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
         Profile profile = sampleProfile(QStringLiteral("PC"), true, false);
-        profile.overallTimeoutMs = 1300;  // long enough for one update after the first
+        profile.overallTimeoutMs = 1300;
         QVERIFY(store.save({profile}, nullptr));
         auto script = std::make_shared<Script>();
         script->statuses = {ProbeStatus::TimedOut};
         MainWindow window(store, fakeFactories(script));
         const auto log = useFakeSystem(window);
+        window.setProgressIntervalMs(50);  // many updates within the run, however loaded the Mac is
         QVERIFY(!window.progressVisible());
         std::optional<Outcome> outcome;
         window.startWakeAndConnect();
@@ -1195,7 +1246,7 @@ private slots:
         QVERIFY(window.progressText().isEmpty());
         QCOMPARE(window.progressPermille(), 0);
 
-        QVERIFY2(log->dock.size() >= 3, qPrintable(QString::number(log->dock.size())));  // start, one tick, clear
+        QVERIFY2(log->dock.size() >= 3, qPrintable(QString::number(log->dock.size())));  // start, ticks, clear
         QCOMPARE(log->dock.back(), kDockCleared);
         QCOMPARE(countOf(log->dock, kDockCleared), 1);
         double previous = 0.0;
@@ -1204,7 +1255,31 @@ private slots:
             QVERIFY(log->dock[i] <= wakedeck::app::kMaxWaitFraction);
             previous = log->dock[i];
         }
-        QVERIFY2(previous > 0.5, qPrintable(QString::number(previous)));  // about 1 s of 1.3 s
+        QVERIFY2(previous > 0.5, qPrintable(QString::number(previous)));  // the last tick, near the end of 1.3 s
+    }
+
+    void progressCountsFromTheStartOfTheRun() {
+        // Review finding F: without a learned time the bar runs against the limit,
+        // which counts from the start of the run, so it reaches the limit.
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), true, false);
+        profile.overallTimeoutMs = 10000;
+        QVERIFY(store.save({profile}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->probeDelayMs = 1100;  // the first check alone takes over a second
+        MainWindow window(store, fakeFactories(script));
+        useFakeSystem(window);
+        window.setProgressIntervalMs(20);
+        window.startWakeAndConnect();
+        QTRY_VERIFY_WITH_TIMEOUT(window.progressVisible(), 5000);
+        // The wake request went out after the first check, but the time shown
+        // includes that check.
+        QVERIFY2(window.progressText().startsWith(QStringLiteral("0:01 of up to 0:10")), qPrintable(window.progressText()));
+        std::optional<Outcome> outcome;
+        QTimer::singleShot(0, &window, [&window] { window.cancelRun(); });
+        QVERIFY(waitForRun(window, outcome));
     }
 
     void progressAlsoWhenWaitingWithoutWake() {
@@ -1320,6 +1395,42 @@ private slots:
 
         QVERIFY(wakedeck::app::runDiagnose(dir.filePath(QStringLiteral("no-such-folder/diagnose.txt"))) != 0);
         QVERIFY(wakedeck::app::runDiagnose(QString()) != 0);
+    }
+
+    // ---- A profiles file that was not read is never written (review finding A) ----
+
+    void aRefusedStoreIsNeverWritten() {
+        QTemporaryDir dir;
+        struct Case {
+            QString file;
+            QByteArray content;
+        };
+        const std::vector<Case> cases = {
+            {QStringLiteral("profiles.json"), R"({"schemaVersion": 3, "profiles": [{"name": "Future PC", "check": {"host": "h"}}]})"},
+            {QStringLiteral("single.json"), R"({"schemaVersion": 2, "name": "Exported PC", "check": {"host": "h"}})"},
+        };
+        for (const Case& c : cases) {
+            const QString path = dir.filePath(c.file);
+            {
+                QFile file(path);
+                QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+                file.write(c.content);
+            }
+            MainWindow window{ProfileStore(path), fakeFactories(std::make_shared<Script>())};
+            QVERIFY(window.profiles().empty());
+            QVERIFY(!window.storeRefusal().isEmpty());
+            QString error;
+            QVERIFY(!window.addProfile(sampleProfile(QStringLiteral("New PC"), true, false), &error));
+            QVERIFY2(error.contains(QStringLiteral("Nothing was changed")), qPrintable(error));
+            QVERIFY(!window.loadExample(&error));
+            QVERIFY(!window.updateProfile(QStringLiteral("Future PC"), sampleProfile(QStringLiteral("Other PC"), false, false), &error));
+            QVERIFY(!window.removeCurrentProfile(&error));
+            QVERIFY(window.profiles().empty());
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QCOMPARE(file.readAll(), c.content);
+            QVERIFY(!QFile::exists(ProfileStore(path).v1BackupPath()));
+        }
     }
 
     // ---- Learned timing and Tailscale in the window ----
