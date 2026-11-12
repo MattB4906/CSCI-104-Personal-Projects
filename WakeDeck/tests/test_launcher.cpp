@@ -96,6 +96,11 @@ class LauncherTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase() {
+        // No test may run the real Tailscale tool: a missing path switches it off.
+        qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale"));
+    }
+
     // ---- Platform layer ----
 
     void launchServicesFindsTextEdit() {

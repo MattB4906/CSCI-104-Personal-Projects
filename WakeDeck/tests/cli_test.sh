@@ -7,6 +7,10 @@
 # Usage: sh tests/cli_test.sh path/to/wakedeck-cli
 set -u
 CLI=${1:?usage: cli_test.sh <path to wakedeck-cli>}
+# Never run the real Tailscale tool: a missing path switches it off; the
+# Tailscale cases below point it at a fake script instead.
+WAKEDECK_TAILSCALE_CLI=/nonexistent/wakedeck-test-tailscale
+export WAKEDECK_TAILSCALE_CLI
 MAC=00:00:5E:00:53:2A
 TO=192.168.1.255
 total=0
@@ -120,6 +124,31 @@ contains "missing client is named" "not found" -- launch --host 127.0.0.1 --clie
 expect 1 "launch rejects a relative client path" -- launch --host 127.0.0.1 --client custom --client-path ok.sh --dry-run
 contains "relative path error says absolute" "absolute" -- launch --host 127.0.0.1 --client custom --client-path ok.sh --dry-run
 contains "connect help names exit codes" "2 timed out" -- connect --help
+contains "connect help names exit code 6" "6 Tailscale is not connected" -- connect --help
+contains "help shows --local-networks for wake" "--to <host>|--local-networks" -- --help
+
+# Tailscale (1.2): a fake tool that reports Tailscale as stopped. connect stops
+# before any check or wake request, so nothing is sent to 100.64.0.10.
+TSDIR=$(mktemp -d)
+cat > "$TSDIR/tailscale" <<'TOOL'
+#!/bin/sh
+[ "$1 $2" = "status --json" ] || exit 9
+echo '{"BackendState": "Stopped", "Peer": {}}'
+TOOL
+chmod +x "$TSDIR/tailscale"
+total=$((total + 1))
+if "$TSDIR/tailscale" status --json | grep -q '"Stopped"'; then
+    WAKEDECK_TAILSCALE_CLI="$TSDIR/tailscale"
+    expect 6 "connect exits 6 when Tailscale is off" -- \
+        connect --check-host 100.64.0.10 --check tcp --check-port 9 --poll-s 1 --timeout-s 1 --mac "$MAC" --to 127.0.0.1
+    contains "connect says Tailscale is off" \
+        "Tailscale is not connected on this Mac (state: Stopped), so 100.64.0.10 cannot be reached" -- \
+        connect --check-host 100.64.0.10 --check tcp --check-port 9 --poll-s 1 --timeout-s 1 --mac "$MAC" --to 127.0.0.1
+    WAKEDECK_TAILSCALE_CLI=/nonexistent/wakedeck-test-tailscale
+else
+    failed=$((failed + 1)); echo "FAILED: the fake Tailscale tool does not run; Tailscale cases skipped"
+fi
+rm -rf "$TSDIR"
 
 # Profiles live in a temporary store here; the real one is never touched.
 STOREDIR=$(mktemp -d)
@@ -270,6 +299,58 @@ while time.time() < end:
     kill "$LISTENER" 2>/dev/null
     wait "$LISTENER" 2>/dev/null
     rm -f "$PORTFILE"
+
+    # Learned timing (1.2): a loopback port that opens about 2 s after the run
+    # starts, so the run ends ready after its wake request (sent to 127.0.0.1).
+    HDIR=$(mktemp -d)
+    HSTORE="$HDIR/profiles.json"
+    LATE=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+    expect 0 "profile add for learned timing" -- profile add --store "$HSTORE" --name "Late PC" --check-host 127.0.0.1 \
+        --check-port "$LATE" --check tcp --mac "$MAC" --to 127.0.0.1 --repeat 1 --interval-ms 0 --resend-s 0
+    late_listener() {
+        python3 -I -c '
+import socket, sys, time
+time.sleep(2)
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(16); s.settimeout(0.5)
+end = time.time() + 8
+while time.time() < end:
+    try:
+        c, _ = s.accept(); c.close()
+    except socket.timeout:
+        pass
+' "$LATE" &
+        LATE_PID=$!
+    }
+    late_listener
+    out=$("$CLI" connect --profile "Late PC" --store "$HSTORE" --poll-s 1 --timeout-s 20 2>&1)
+    rc=$?
+    kill "$LATE_PID" 2>/dev/null; wait "$LATE_PID" 2>/dev/null
+    total=$((total + 1))
+    case "$rc:$out" in
+        0:*"Result: ready after wake"*) ;;
+        *) failed=$((failed + 1)); echo "FAILED: connect --profile with a late port: exit $rc"; echo "$out" | tail -3 ;;
+    esac
+    total=$((total + 1))
+    if ! grep -q '"late pc"' "$HDIR/history.json" 2>/dev/null; then
+        failed=$((failed + 1)); echo "FAILED: history.json beside the store does not hold the run"
+    fi
+    total=$((total + 1))
+    if [ -e "$HDIR/profiles.history.json" ]; then failed=$((failed + 1)); echo "FAILED: history named wrongly"; fi
+    late_listener
+    out=$("$CLI" connect --profile "Late PC" --store "$HSTORE" --poll-s 1 --timeout-s 20 2>&1)
+    kill "$LATE_PID" 2>/dev/null; wait "$LATE_PID" 2>/dev/null
+    total=$((total + 1))
+    case "$out" in
+        *"Last time: 0:0"*) ;;
+        *) failed=$((failed + 1)); echo "FAILED: the second run does not say how long the first took"; echo "$out" | head -5 ;;
+    esac
+    total=$((total + 1))
+    if [ "$(grep -c '"ms"' "$HDIR/history.json")" -ne 2 ]; then failed=$((failed + 1)); echo "FAILED: the second run was not recorded"; fi
+    expect 0 "profile remove takes the history along" -- profile remove "Late PC" --store "$HSTORE"
+    total=$((total + 1))
+    if grep -q '"late pc"' "$HDIR/history.json"; then failed=$((failed + 1)); echo "FAILED: the history kept a removed computer"; fi
+    rm -rf "$HDIR"
 else
     echo "note: python3 not found; the loopback end-to-end cases were skipped"
 fi

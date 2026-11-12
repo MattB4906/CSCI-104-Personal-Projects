@@ -4,6 +4,11 @@
 #include <QtTest>
 
 #include <QCoreApplication>
+#include <QFile>
+#include <QFileInfo>
+#include <QTimeZone>
+#include <QScopeGuard>
+#include <QTemporaryDir>
 #include <QHostAddress>
 #include <QNetworkDatagram>
 #include <QTcpServer>
@@ -21,6 +26,7 @@
 #include "engine/QtWaker.h"
 #include "engine/ServiceProbe.h"
 #include "engine/Session.h"
+#include "engine/Tailscale.h"
 
 using namespace wakedeck;
 
@@ -109,6 +115,20 @@ struct Script {
     QElapsedTimer clock;            // started by fakeFactories
     int wakersInFlight = 0;
     int maxWakersInFlight = 0;
+    // Tailscale: one status per read (the last one repeats); empty: the factory returns no reader.
+    std::vector<TailscaleStatus> tailscale;
+    int readersCreated = 0;
+};
+
+class FakeTailscaleReader final : public TailscaleReader {
+public:
+    FakeTailscaleReader(TailscaleStatus status, QObject* parent) : TailscaleReader(parent), status_(std::move(status)) {}
+    void start() override {
+        QTimer::singleShot(0, this, [this] { emit finished(status_); });
+    }
+
+private:
+    TailscaleStatus status_;
 };
 
 // Counts how many wake requests are in flight at once and answers after a delay.
@@ -163,6 +183,12 @@ SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
     if (script->launchOk.has_value()) {
         factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(*script->launchOk, parent); };
     }
+    factories.tailscale = [script](QObject* parent) -> TailscaleReader* {
+        ++script->readersCreated;
+        if (script->tailscale.empty()) return nullptr;
+        const std::size_t index = std::min(static_cast<std::size_t>(script->readersCreated - 1), script->tailscale.size() - 1);
+        return new FakeTailscaleReader(script->tailscale[index], parent);
+    };
     return factories;
 }
 
@@ -221,6 +247,78 @@ ProbeResult runProbe(Probe* probe, int timeoutMs = 5000) {
     return out.value_or(fallback);
 }
 
+// Sample answers of "tailscale status --json", with invented names and
+// documentation addresses only.
+const char* const kTailscaleRunning = R"({
+  "Version": "1.90.0",
+  "BackendState": "Running",
+  "Self": {"HostName": "this-mac", "DNSName": "this-mac.example-tailnet.ts.net.", "TailscaleIPs": ["100.64.0.1"],
+           "Online": true},
+  "Peer": {
+    "nodekey:aaaa": {"HostName": "LIVING-ROOM-PC", "DNSName": "living-room-pc.example-tailnet.ts.net.",
+                     "TailscaleIPs": ["100.64.0.10", "fd7a:115c:a1e0::a"], "Online": true,
+                     "LastSeen": "0001-01-01T00:00:00Z", "OS": "windows"},
+    "nodekey:bbbb": {"HostName": "office-nas", "DNSName": "office-nas.example-tailnet.ts.net.",
+                     "TailscaleIPs": ["100.64.0.11"], "Online": false,
+                     "LastSeen": "2026-11-12T10:00:00.123456789Z", "OS": "linux"}
+  }
+})";
+
+TailscaleStatus tailscaleState(const QString& state) {
+    TailscaleStatus status;
+    status.available = true;
+    status.backendState = state;
+    return status;
+}
+
+TailscaleStatus tailscaleWithPc(bool online) {
+    TailscaleStatus status = tailscaleState(QStringLiteral("Running"));
+    TailscalePeer peer;
+    peer.hostName = QStringLiteral("LIVING-ROOM-PC");
+    peer.dnsName = QStringLiteral("living-room-pc.example-tailnet.ts.net.");
+    peer.addresses = {QStringLiteral("100.64.0.10")};
+    peer.online = online;
+    status.peers.push_back(peer);
+    return status;
+}
+
+TailscaleStatus tailscaleUnavailable() {
+    TailscaleStatus status;
+    status.error = QStringLiteral("not found");
+    return status;
+}
+
+SessionConfig tailscaleConfig() {
+    SessionConfig config = quickConfig(true);
+    config.check.host = QStringLiteral("100.64.0.10");
+    return config;
+}
+
+// Runs a ProcessTailscaleReader against a fake tool given by the environment
+// variable, and puts the variable back to a missing path afterwards.
+std::optional<TailscaleStatus> readWithTool(const QString& tool, int limitMs = ProcessTailscaleReader::kDefaultLimitMs,
+                                            int waitMs = 5000) {
+    qputenv("WAKEDECK_TAILSCALE_CLI", tool.toLocal8Bit());
+    const auto restore = qScopeGuard([] { qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale")); });
+    std::optional<TailscaleStatus> out;
+    ProcessTailscaleReader reader(nullptr, limitMs);
+    QObject::connect(&reader, &TailscaleReader::finished, [&out](const TailscaleStatus& status) { out = status; });
+    reader.start();
+    if (out) return std::nullopt;  // must never finish inside start()
+    [[maybe_unused]] const bool finished = QTest::qWaitFor([&out] { return out.has_value(); }, waitMs);
+    return out;
+}
+
+QString writeScript(const QTemporaryDir& dir, const QString& name, const QByteArray& body) {
+    const QString path = dir.filePath(name);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) return {};
+    file.write("#!/bin/sh\n" + body);
+    file.close();
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+    return path;
+}
+
 quint16 closedLocalPort() {
     QTcpServer server;
     server.listen(QHostAddress::LocalHost, 0);
@@ -233,6 +331,11 @@ class EngineTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase() {
+        // No test may run the real Tailscale tool: a missing path switches it off.
+        qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale"));
+    }
+
     // ---- Sunshine reply parsing (pure) ----
 
     void serverInfoReady() {
@@ -959,6 +1062,347 @@ private slots:
         QVERIFY(!looksLikeTailscale(QStringLiteral("100.128.0.1")));
         QVERIFY(!looksLikeTailscale(QStringLiteral("192.168.1.5")));
         QVERIFY(!looksLikeTailscale(QStringLiteral("pc.example.net")));
+    }
+
+    // ---- Tailscale: parsing and matching (pure) ----
+
+    void tailscaleParsesARunningStatus() {
+        const TailscaleStatus status = parseTailscaleStatus(kTailscaleRunning);
+        QVERIFY(status.available);
+        QVERIFY(status.running());
+        QCOMPARE(status.backendState, QStringLiteral("Running"));
+        QCOMPARE(status.peers.size(), std::size_t(2));  // Self is not a peer
+        const TailscalePeer* pc = findTailscalePeer(status, QStringLiteral("100.64.0.10"));
+        QVERIFY(pc != nullptr);
+        QVERIFY(pc->online);
+        QVERIFY(!pc->lastSeen.isValid());  // the zero time means unknown
+        QCOMPARE(pc->displayName(), QStringLiteral("living-room-pc"));
+        QCOMPARE(findTailscalePeer(status, QStringLiteral("FD7A:115C:A1E0::A")), pc);
+        QCOMPARE(findTailscalePeer(status, QStringLiteral("living-room-pc.example-tailnet.ts.net")), pc);
+        QCOMPARE(findTailscalePeer(status, QStringLiteral("Living-Room-PC.Example-Tailnet.TS.NET.")), pc);
+        QCOMPARE(findTailscalePeer(status, QStringLiteral("living-room-pc")), pc);
+        const TailscalePeer* nas = findTailscalePeer(status, QStringLiteral("office-nas"));
+        QVERIFY(nas != nullptr);
+        QVERIFY(!nas->online);
+        QCOMPARE(nas->lastSeen, QDateTime(QDate(2026, 11, 12), QTime(10, 0), QTimeZone::UTC));
+        QVERIFY(findTailscalePeer(status, QStringLiteral("100.64.0.99")) == nullptr);
+        QVERIFY(findTailscalePeer(status, QStringLiteral("other-pc.example-tailnet.ts.net")) == nullptr);
+        QVERIFY(findTailscalePeer(status, QStringLiteral("living-room-pc.other.ts.net")) == nullptr);  // dots: whole name only
+        QVERIFY(findTailscalePeer(status, QStringLiteral("this-mac")) == nullptr);
+    }
+
+    void tailscaleDescribesWhatItShows() {
+        const TailscaleStatus status = parseTailscaleStatus(kTailscaleRunning);
+        const QDateTime now(QDate(2026, 11, 12), QTime(13, 5), QTimeZone::UTC);
+        QCOMPARE(describeTailscale(status, QStringLiteral("100.64.0.10"), now),
+                 QStringLiteral("Tailscale is connected; it shows living-room-pc online"));
+        QCOMPARE(describeTailscale(status, QStringLiteral("100.64.0.11"), now),
+                 QStringLiteral("Tailscale is connected; it shows office-nas offline, last seen 3 h ago"));
+        QCOMPARE(describeTailscale(status, QStringLiteral("100.64.0.99"), now),
+                 QStringLiteral("Tailscale is connected; 100.64.0.99 is not one of its devices"));
+        QCOMPARE(formatAgo(5), QStringLiteral("less than a minute ago"));
+        QCOMPARE(formatAgo(12 * 60 + 5), QStringLiteral("12 min ago"));
+        QCOMPARE(formatAgo(3 * 3600), QStringLiteral("3 h ago"));
+        QCOMPARE(formatAgo(4 * 86400), QStringLiteral("4 days ago"));
+    }
+
+    void tailscaleStoppedAndNeedsLogin() {
+        for (const char* state : {"Stopped", "NeedsLogin"}) {
+            const QByteArray json = QByteArray("{\"BackendState\": \"") + state + "\", \"Peer\": null}";
+            const TailscaleStatus status = parseTailscaleStatus(json);
+            QVERIFY(status.available);
+            QVERIFY(!status.running());
+            QVERIFY(status.peers.empty());
+            QCOMPARE(describeTailscale(status, QStringLiteral("100.64.0.10")),
+                     QStringLiteral("Tailscale is not connected on this Mac (state: %1)").arg(QLatin1String(state)));
+        }
+    }
+
+    void tailscaleMissingFieldsKeepDefaults() {
+        const TailscaleStatus status = parseTailscaleStatus(
+            "{\"BackendState\": \"Running\", \"Peer\": {\"a\": {}, \"b\": 7, "
+            "\"c\": {\"HostName\": \"game-box\", \"TailscaleIPs\": [\"100.64.0.12\", 5], \"LastSeen\": \"yesterday\"}}}");
+        QVERIFY(status.available);
+        QCOMPARE(status.peers.size(), std::size_t(2));  // the entry that is not an object is skipped
+        const TailscalePeer* box = findTailscalePeer(status, QStringLiteral("game-box"));
+        QVERIFY(box != nullptr);
+        QCOMPARE(box->addresses, QStringList{QStringLiteral("100.64.0.12")});
+        QVERIFY(!box->online);
+        QVERIFY(!box->lastSeen.isValid());
+        QCOMPARE(box->displayName(), QStringLiteral("game-box"));
+        QCOMPARE(describeTailscale(status, QStringLiteral("100.64.0.12")),
+                 QStringLiteral("Tailscale is connected; it shows game-box offline"));
+    }
+
+    void tailscaleGarbageIsUnavailable() {
+        for (const QByteArray& garbage : {QByteArray("not json"), QByteArray("[]"), QByteArray("{}"),
+                                          QByteArray("{\"BackendState\": 3}"), QByteArray("{\"BackendState\": \"\"}"),
+                                          QByteArray()}) {
+            const TailscaleStatus status = parseTailscaleStatus(garbage);
+            QVERIFY2(!status.available, garbage.constData());
+            QVERIFY(!status.error.isEmpty());
+            QVERIFY(describeTailscale(status, QStringLiteral("100.64.0.10")).isEmpty());
+        }
+    }
+
+    // ---- Tailscale: the reader against fake tools ----
+
+    void tailscaleCandidates() {
+        QCOMPARE(tailscaleCliCandidates(), QStringList{QStringLiteral("/nonexistent/wakedeck-test-tailscale")});
+        QVERIFY(findTailscaleCli().isEmpty());  // the variable is the only candidate, even when missing
+        qunsetenv("WAKEDECK_TAILSCALE_CLI");
+        const auto restore = qScopeGuard([] { qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale")); });
+        QCOMPARE(tailscaleCliCandidates(),
+                 (QStringList{QStringLiteral("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+                              QStringLiteral("/usr/local/bin/tailscale"), QStringLiteral("/opt/homebrew/bin/tailscale")}));
+        QCOMPARE(ProcessTailscaleReader::kDefaultLimitMs, 3000);
+    }
+
+    void tailscaleReaderReadsTheAnswer() {
+        QTemporaryDir dir;
+        const QString tool = writeScript(dir, QStringLiteral("tailscale"),
+                                         QByteArray("[ \"$1 $2\" = \"status --json\" ] || exit 9\ncat <<'END'\n") +
+                                             kTailscaleRunning + "\nEND\n");
+        const auto status = readWithTool(tool);
+        QVERIFY(status.has_value());
+        QVERIFY2(status->available, qPrintable(status->error));
+        QCOMPARE(status->backendState, QStringLiteral("Running"));
+        QCOMPARE(status->peers.size(), std::size_t(2));
+    }
+
+    void tailscaleReaderStopsASlowTool() {
+        QTemporaryDir dir;
+        const QString tool = writeScript(dir, QStringLiteral("slow"), "exec sleep 30\n");
+        QElapsedTimer clock;
+        clock.start();
+        const auto status = readWithTool(tool, 300, 10000);
+        QVERIFY(status.has_value());
+        QVERIFY(!status->available);
+        QVERIFY2(status->error.contains(QStringLiteral("did not answer within 300 ms")), qPrintable(status->error));
+        QVERIFY(clock.elapsed() < 10000);  // ended by the limit, not by the tool
+    }
+
+    void tailscaleReaderReportsAFailingTool() {
+        QTemporaryDir dir;
+        const QString tool = writeScript(dir, QStringLiteral("failing"), "echo 'something went wrong' >&2\nexit 1\n");
+        const auto status = readWithTool(tool);
+        QVERIFY(status.has_value());
+        QVERIFY(!status->available);
+        QVERIFY2(status->error.contains(QStringLiteral("exited with code 1")), qPrintable(status->error));
+    }
+
+    void tailscaleReaderWithoutTheTool() {
+        const auto status = readWithTool(QStringLiteral("/nonexistent/wakedeck-test-tailscale"));
+        QVERIFY(status.has_value());
+        QVERIFY(!status->available);
+        QVERIFY2(status->error.contains(QStringLiteral("not found")), qPrintable(status->error));
+    }
+
+    void tailscaleRealToolWhenAsked() {
+        // Optional: runs Tailscale's real tool only with WAKEDECK_TEST_REAL_TAILSCALE=1,
+        // read-only, and prints nothing it returns (no names, no addresses).
+        const QString real = QStringLiteral("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        if (qgetenv("WAKEDECK_TEST_REAL_TAILSCALE") != "1" || !QFileInfo(real).isExecutable()) {
+            qInfo("not run: needs WAKEDECK_TEST_REAL_TAILSCALE=1 and Tailscale installed");
+            return;
+        }
+        const auto status = readWithTool(real);
+        QVERIFY(status.has_value());  // an answer or "unavailable", always within the limit
+        if (status->available) QVERIFY(!status->backendState.isEmpty());
+    }
+
+    // ---- Tailscale in the session ----
+
+    void sessionStopsAtOnceWhenTailscaleIsOff() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Ready};
+        script->tailscale = {tailscaleState(QStringLiteral("Stopped"))};
+        Session session(tailscaleConfig(), fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TailscaleOff);
+        QCOMPARE(run.summary, QStringLiteral("Tailscale is not connected on this Mac (state: Stopped), so 100.64.0.10 cannot "
+                                             "be reached. Turn Tailscale on and try again."));
+        QCOMPARE(script->readersCreated, 1);
+        QCOMPARE(script->probesCreated, 0);
+        QCOMPARE(script->wakersCreated, 0);
+        QCOMPARE(run.events, QStringList{QStringLiteral("Tailscale is not connected on this Mac (state: Stopped)")});
+        QCOMPARE(run.kinds.front(), EventKind::Failure);
+        QCOMPARE(session.state(), SessionState::Failed);
+        QCOMPARE(outcomeName(Outcome::TailscaleOff), QStringLiteral("Tailscale not connected"));
+    }
+
+    void sessionGoesOnWhenTailscaleShowsTheDeviceOffline() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut, ProbeStatus::Ready};
+        script->tailscale = {tailscaleWithPc(false)};
+        Session session(tailscaleConfig(), fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
+        QCOMPARE(run.events.value(0), QStringLiteral("Tailscale is connected; it shows living-room-pc offline"));
+        QVERIFY(run.events.value(1).startsWith(QStringLiteral("Checking ")));
+        QCOMPARE(script->wakersCreated, 1);
+        QCOMPARE(script->readersCreated, 1);  // read once more only at a timeout
+    }
+
+    void sessionReadsTailscaleOnceMoreAtATimeout() {
+        struct Case {
+            TailscaleStatus atEnd;
+            QString expected;
+        };
+        const std::vector<Case> cases = {
+            {tailscaleWithPc(true), QStringLiteral("Tailscale shows the computer online, so it is awake and connected; "
+                                                   "the service on port 47989 did not answer: check that it is running.")},
+            {tailscaleWithPc(false), QStringLiteral("Tailscale still shows the computer offline, so it most likely did not "
+                                                    "wake up, or woke up without Tailscale.")},
+            {tailscaleState(QStringLiteral("Stopped")), QStringLiteral("Tailscale is no longer connected on this Mac")},
+        };
+        for (const Case& c : cases) {
+            auto script = std::make_shared<Script>();
+            script->statuses = {ProbeStatus::TimedOut};
+            script->tailscale = {tailscaleWithPc(false), c.atEnd};
+            SessionConfig config = tailscaleConfig();
+            config.overallTimeoutMs = 60;
+            Session session(config, fakeFactories(script));
+            const Run run = runSession(session);
+            QVERIFY(run.outcome.has_value());
+            QCOMPARE(*run.outcome, Outcome::TimedOut);
+            QVERIFY2(run.summary.contains(c.expected), qPrintable(run.summary));
+            QCOMPARE(script->readersCreated, 2);
+        }
+    }
+
+    void sessionWithoutATailscaleAnswerIsUnchanged() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->tailscale = {tailscaleUnavailable()};
+        SessionConfig config = tailscaleConfig();
+        config.overallTimeoutMs = 60;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TimedOut);
+        QCOMPARE(script->readersCreated, 1);  // no second read without a first answer
+        QVERIFY(run.events.value(0).startsWith(QStringLiteral("Checking ")));
+        QVERIFY(!run.hasEvent(QStringLiteral("Tailscale is")));
+        QVERIFY(!run.summary.contains(QStringLiteral("Tailscale shows")));
+        QVERIFY(!run.summary.contains(QStringLiteral("no longer connected")));
+
+        // A factory that returns no reader at all: the same.
+        auto none = std::make_shared<Script>();
+        none->statuses = {ProbeStatus::Ready};
+        Session quiet(tailscaleConfig(), fakeFactories(none));
+        const Run ready = runSession(quiet);
+        QVERIFY(ready.outcome.has_value());
+        QCOMPARE(*ready.outcome, Outcome::ReadyWithoutWake);
+        QCOMPARE(none->readersCreated, 1);
+    }
+
+    void sessionNeverAsksTailscaleForOtherHosts() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->tailscale = {tailscaleState(QStringLiteral("Stopped"))};
+        SessionConfig config = quickConfig(true);  // 192.0.2.10
+        config.overallTimeoutMs = 60;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TimedOut);
+        QCOMPARE(script->readersCreated, 0);
+        QVERIFY(!run.hasEvent(QStringLiteral("Tailscale")));
+    }
+
+    void explainAddsWhatTailscaleShows() {
+        Observations o;
+        o.check.host = QStringLiteral("100.64.0.10");
+        o.check.port = 47989;
+        o.wakeConfigured = true;
+        o.elapsedMs = 60000;
+        QVERIFY(!explainTimeout(o).contains(QStringLiteral("Tailscale shows")));
+        o.tailscale = TailscaleAtTimeout::DeviceOnline;
+        QVERIFY(explainTimeout(o).contains(QStringLiteral("Tailscale shows the computer online")));
+        o.tailscale = TailscaleAtTimeout::DeviceOffline;
+        QVERIFY(explainTimeout(o).contains(QStringLiteral("Tailscale still shows the computer offline")));
+        o.tailscale = TailscaleAtTimeout::NotRunning;
+        QVERIFY(explainTimeout(o).contains(QStringLiteral("Tailscale is no longer connected on this Mac, so 100.64.0.10")));
+    }
+
+    // ---- Learned timing in the session ----
+
+    void sessionSaysWhatIsUsualAndWhenItTakesLonger() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->readyAfterMs = 150;
+        SessionConfig config = quickConfig(true);
+        config.pollIntervalMs = 10;
+        LearnedTiming learned;
+        learned.entries = 5;
+        learned.medianOf = 5;
+        learned.typicalMs = 30000;
+        learned.lastMs = 26000;
+        learned.longerAfterMs = 30;  // milliseconds here; the real rule is tested with the history
+        config.learned = learned;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyAfterWake);
+        int sent = -1;
+        for (int i = 0; i < run.events.size() && sent < 0; ++i) {
+            if (run.events[i].startsWith(QStringLiteral("Wake request sent: "))) sent = i;
+        }
+        QVERIFY(sent >= 0);
+        QCOMPARE(run.events.value(sent + 1), QStringLiteral("Usually ready about 0:30 after the wake request (last 5 runs)"));
+        QCOMPARE(run.events.filter(QStringLiteral("Taking longer than usual")).size(), 1);
+        QVERIFY(session.wakeToReadyMs().has_value());
+        QVERIFY(*session.wakeToReadyMs() >= 100);
+    }
+
+    void sessionWithFewRunsSaysLastTime() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut, ProbeStatus::Ready};
+        SessionConfig config = quickConfig(true);
+        LearnedTiming learned;
+        learned.entries = 2;
+        learned.medianOf = 2;
+        learned.typicalMs = 30000;
+        learned.lastMs = 26000;
+        learned.longerAfterMs = 60000;
+        config.learned = learned;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QVERIFY(run.hasEvent(QStringLiteral("Last time: 0:26")));
+        QVERIFY(!run.hasEvent(QStringLiteral("Taking longer")));
+    }
+
+    void sessionWithoutWakeHasNoWakeToReadyTime() {
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Ready};
+        SessionConfig config = quickConfig(true);
+        LearnedTiming learned;
+        learned.entries = 4;
+        learned.medianOf = 4;
+        learned.typicalMs = 30000;
+        learned.lastMs = 30000;
+        learned.longerAfterMs = 5;
+        config.learned = learned;
+        Session session(config, fakeFactories(script));
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::ReadyWithoutWake);
+        QVERIFY(!session.wakeToReadyMs().has_value());
+        QVERIFY(!run.hasEvent(QStringLiteral("Usually ready")));
+
+        auto failed = std::make_shared<Script>();
+        failed->statuses = {ProbeStatus::TimedOut};
+        SessionConfig timing = quickConfig(true);
+        timing.overallTimeoutMs = 60;
+        Session timedOut(timing, fakeFactories(failed));
+        const Run late = runSession(timedOut);
+        QVERIFY(late.outcome.has_value());
+        QCOMPARE(*late.outcome, Outcome::TimedOut);
+        QVERIFY(!timedOut.wakeToReadyMs().has_value());
     }
 };
 

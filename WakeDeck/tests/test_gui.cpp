@@ -37,6 +37,8 @@
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
 #include "engine/Session.h"
+#include "engine/Tailscale.h"
+#include "engine/TimingHistory.h"
 
 using namespace wakedeck;
 using wakedeck::app::MainWindow;
@@ -100,6 +102,18 @@ struct Script {
     qint64 runningPid = 0;  // the running copy it found, when it started none (0: same as launchPid)
     int probesCreated = 0;
     int wakersCreated = 0;
+    QString tailscaleState;  // empty: no Tailscale reader; otherwise its state, with the computer online
+};
+
+class FakeTailscaleReader final : public TailscaleReader {
+public:
+    FakeTailscaleReader(TailscaleStatus status, QObject* parent) : TailscaleReader(parent), status_(std::move(status)) {}
+    void start() override {
+        QTimer::singleShot(0, this, [this] { emit finished(status_); });
+    }
+
+private:
+    TailscaleStatus status_;
 };
 
 MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
@@ -122,6 +136,18 @@ MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
         } else {
             factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(script->launchOk, script->launchPid, script->runningPid, parent); };
         }
+        factories.tailscale = [script](QObject* parent) -> TailscaleReader* {
+            if (script->tailscaleState.isEmpty()) return nullptr;
+            TailscaleStatus status;
+            status.available = true;
+            status.backendState = script->tailscaleState;
+            TailscalePeer peer;
+            peer.dnsName = QStringLiteral("living-room-pc.example-tailnet.ts.net.");
+            peer.addresses = {QStringLiteral("100.64.0.10")};
+            peer.online = true;
+            status.peers.push_back(peer);
+            return new FakeTailscaleReader(status, parent);
+        };
         return factories;
     };
 }
@@ -1277,12 +1303,16 @@ private slots:
         QFile file(report);
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-        QCOMPARE(lines.size(), 5);
+        QCOMPARE(lines.size(), 8);
         QVERIFY(lines[0].startsWith(QStringLiteral("version=")));
         QCOMPARE(lines[1], QStringLiteral("platform=offscreen"));
         QCOMPARE(lines[2], QStringLiteral("bundleId=none"));
         QCOMPARE(lines[3], QStringLiteral("notifications=unavailable"));
         QCOMPARE(lines[4], QStringLiteral("dockTile=unavailable"));
+        // Tailscale: the suite points the tool at a missing path, so it is never run.
+        QCOMPARE(lines[5], QStringLiteral("tailscaleCli=not found"));
+        QVERIFY2(lines[6].startsWith(QStringLiteral("tailscaleState=error: ")), qPrintable(lines[6]));
+        QCOMPARE(lines[7], QStringLiteral("tailscalePeers=0"));
         QFile picture(report + QStringLiteral(".dock.png"));
         QVERIFY(picture.open(QIODevice::ReadOnly));
         QCOMPARE(picture.read(8), QByteArray("\x89PNG\r\n\x1a\n", 8));
@@ -1290,6 +1320,149 @@ private slots:
 
         QVERIFY(wakedeck::app::runDiagnose(dir.filePath(QStringLiteral("no-such-folder/diagnose.txt"))) != 0);
         QVERIFY(wakedeck::app::runDiagnose(QString()) != 0);
+    }
+
+    // ---- Learned timing and Tailscale in the window ----
+
+    void aSecondRunShowsTheLearnedTime() {
+        QTemporaryDir dir;
+        const QString storePath = dir.filePath(QStringLiteral("profiles.json"));
+        const ProfileStore store(storePath);
+        QVERIFY(store.save({sampleProfile(QStringLiteral("Gaming PC"), true, false)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut, ProbeStatus::TimedOut, ProbeStatus::Ready};
+        MainWindow window(store, fakeFactories(script));
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyAfterWake);
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("Last time")).isEmpty());  // nothing learned yet
+        const QString historyPath = dir.filePath(QStringLiteral("history.json"));
+        QVERIFY(QFile::exists(historyPath));
+        QCOMPARE(window.timingHistory().path(), historyPath);
+        QCOMPARE(window.timingHistory().entries(QStringLiteral("gaming pc")).size(), std::size_t(1));
+
+        script->probesCreated = 0;
+        outcome.reset();
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyAfterWake);
+        const QStringList texts = window.timelineTexts();
+        const QStringList learned = texts.filter(QRegularExpression(QStringLiteral("  Last time: \\d:\\d\\d$")));
+        QCOMPARE(learned.size(), 1);
+        int sent = -1;
+        for (int i = 0; i < texts.size() && sent < 0; ++i) {
+            if (texts[i].contains(QStringLiteral("  Wake request sent: "))) sent = i;
+        }
+        QVERIFY(sent >= 0);
+        QCOMPARE(texts.indexOf(learned.first()), sent + 1);  // right after the wake request
+        QCOMPARE(window.timingHistory().entries(QStringLiteral("Gaming PC")).size(), std::size_t(2));
+
+        // A run that is ready at once, and one that times out, record nothing.
+        script->statuses = {ProbeStatus::Ready};
+        script->probesCreated = 0;
+        outcome.reset();
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QCOMPARE(window.timingHistory().entries(QStringLiteral("Gaming PC")).size(), std::size_t(2));
+    }
+
+    void theLearnedTimeFeedsTheProgress() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), true, false);
+        profile.overallTimeoutMs = 10000;
+        QVERIFY(store.save({profile}, nullptr));
+        const TimingHistory history(dir.filePath(QStringLiteral("history.json")));
+        for (int i = 0; i < 3; ++i) QVERIFY(history.record(QStringLiteral("PC"), 30000));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        window.startWakeAndConnect();
+        QTRY_VERIFY_WITH_TIMEOUT(window.progressVisible(), 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.timelineTexts().filter(QStringLiteral("Usually ready")).isEmpty(), 2000);
+        QVERIFY2(window.timelineTexts().filter(QStringLiteral("Usually ready about 0:30 after the wake request (last 3 runs)")).size() == 1,
+                 qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
+        QVERIFY2(window.progressText().startsWith(QStringLiteral("usually about 0:30 — 0:0")), qPrintable(window.progressText()));
+        QVERIFY(!log->dock.empty());
+        std::optional<Outcome> outcome;
+        QTimer::singleShot(0, &window, [&window] { window.cancelRun(); });
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(history.entries(QStringLiteral("PC")).size(), std::size_t(3));  // a cancelled run adds nothing
+    }
+
+    void deletingAndRenamingCarryTheHistory() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("Gaming PC"), true, false), sampleProfile(QStringLiteral("Office PC"), true, false)},
+                           nullptr));
+        const TimingHistory history(dir.filePath(QStringLiteral("history.json")));
+        QVERIFY(history.record(QStringLiteral("Gaming PC"), 20000));
+        QVERIFY(history.record(QStringLiteral("Office PC"), 40000));
+        MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+        window.selectProfile(QStringLiteral("Gaming PC"));
+        Profile renamed = *window.currentProfile();
+        renamed.name = QStringLiteral("Den PC");
+        QString error;
+        QVERIFY2(window.updateProfile(QStringLiteral("Gaming PC"), renamed, &error), qPrintable(error));
+        QVERIFY(findProfile(window.profiles(), QStringLiteral("Gaming PC")) == nullptr);
+        QVERIFY(history.entries(QStringLiteral("Gaming PC")).empty());
+        QCOMPARE(history.learned(QStringLiteral("Den PC"))->lastMs, qint64(20000));
+        // An edit that keeps the name keeps the history where it is.
+        Profile same = *window.currentProfile();
+        same.notes = QStringLiteral("edited");
+        QVERIFY(window.updateProfile(QStringLiteral("den pc"), same, &error));
+        QCOMPARE(history.entries(QStringLiteral("Den PC")).size(), std::size_t(1));
+
+        window.selectProfile(QStringLiteral("Office PC"));
+        QVERIFY(window.removeCurrentProfile(&error));
+        QVERIFY(history.entries(QStringLiteral("Office PC")).empty());
+        QCOMPARE(history.entries(QStringLiteral("Den PC")).size(), std::size_t(1));
+    }
+
+    void tailscaleOffEndsTheRunAtOnce() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("Living Room PC"), true, false);
+        profile.check.host = QStringLiteral("100.64.0.10");
+        QVERIFY(store.save({profile}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->tailscaleState = QStringLiteral("Stopped");
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::TailscaleOff);
+        QCOMPARE(script->probesCreated, 0);
+        QCOMPARE(script->wakersCreated, 0);
+        QCOMPARE(window.serviceStatusText(), QStringLiteral("not checked: Tailscale is off on this Mac"));
+        QCOMPARE(window.wakeStatusText(), QStringLiteral("not sent"));
+        QVERIFY(window.explanationVisible());
+        QVERIFY2(window.explanationText().contains(QStringLiteral("Turn Tailscale on and try again")), qPrintable(window.explanationText()));
+        QPushButton* tryAgain = nullptr;
+        for (QPushButton* button : window.findChildren<QPushButton*>()) {
+            if (button->text() == QStringLiteral("Try again")) tryAgain = button;
+        }
+        QVERIFY(tryAgain != nullptr);
+        QVERIFY(!tryAgain->isHidden());
+        QVERIFY(!window.locateOffered());
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("Tailscale is not connected on this Mac (state: Stopped)")).size() == 1);
+        QCOMPARE(log->notifications.size(), std::size_t(1));
+        QCOMPARE(log->notifications.front().first, QStringLiteral("Living Room PC cannot be reached"));
+        QVERIFY(log->notifications.front().second.startsWith(QStringLiteral("Tailscale is not connected on this Mac")));
+        QVERIFY(!QFile::exists(dir.filePath(QStringLiteral("history.json"))));
+
+        // Running, with the computer shown online: the run goes on and says so.
+        script->tailscaleState = QStringLiteral("Running");
+        outcome.reset();
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QVERIFY2(window.timelineTexts().filter(QStringLiteral("Tailscale is connected; it shows living-room-pc online")).size() == 1,
+                 qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
     }
 
     // ---- Editor ----
@@ -1366,6 +1539,8 @@ private slots:
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
+    // No test may run the real Tailscale tool: a missing path switches it off.
+    qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale"));
     // Settings go to an INI file in a temporary folder under a test name, so the
     // window never reads or writes the user's own WakeDeck preferences.
     QTemporaryDir settingsDir;

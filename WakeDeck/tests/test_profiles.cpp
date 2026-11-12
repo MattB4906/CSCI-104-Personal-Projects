@@ -5,6 +5,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -13,6 +14,7 @@
 
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
+#include "engine/TimingHistory.h"
 
 using namespace wakedeck;
 
@@ -570,6 +572,119 @@ private slots:
         const QString path = ProfileStore::defaultPath();
         QVERIFY2(path.endsWith(QStringLiteral("/WakeDeck/profiles.json")), qPrintable(path));
         QVERIFY2(path.contains(QStringLiteral("Application Support")), qPrintable(path));
+    }
+    // ---- Learned timing: the history beside the store ----
+
+    void historyMedian() {
+        QCOMPARE(medianMs({}), qint64(0));
+        QCOMPARE(medianMs({30000}), qint64(30000));
+        QCOMPARE(medianMs({40000, 10000, 30000}), qint64(30000));
+        QCOMPARE(medianMs({10000, 40000, 20000, 30000}), qint64(25000));
+        QCOMPARE(longerThanUsualMs(10000), qint64(30000));   // typical + 20 s is larger
+        QCOMPARE(longerThanUsualMs(60000), qint64(120000));  // twice the typical time is larger
+    }
+
+    void historyIsNamedAfterTheStore() {
+        QCOMPARE(TimingHistory::pathBeside(QStringLiteral("/x/WakeDeck/profiles.json")), QStringLiteral("/x/WakeDeck/history.json"));
+        QCOMPARE(TimingHistory::pathBeside(QStringLiteral("/x/work.json")), QStringLiteral("/x/work.history.json"));
+        QCOMPARE(TimingHistory::pathBeside(QStringLiteral("/x/home.profiles.json")), QStringLiteral("/x/home.profiles.history.json"));
+        QCOMPARE(TimingHistory::pathBeside(ProfileStore::defaultPath()),
+                 QFileInfo(ProfileStore::defaultPath()).dir().filePath(QStringLiteral("history.json")));
+    }
+
+    void historyRecordsAndPersists() {
+        QTemporaryDir dir;
+        const QString path = TimingHistory::pathBeside(dir.filePath(QStringLiteral("profiles.json")));
+        const TimingHistory history(path);
+        QVERIFY(!history.learned(QStringLiteral("Gaming PC")).has_value());
+        QVERIFY(!QFile::exists(path));
+        QString error;
+        QVERIFY2(history.record(QStringLiteral("Gaming PC"), 26000, QDateTime::currentDateTimeUtc(), &error), qPrintable(error));
+        QVERIFY(QFile::exists(path));
+        auto learned = TimingHistory(path).learned(QStringLiteral("gaming pc"));  // read back from the file
+        QVERIFY(learned.has_value());
+        QCOMPARE(learned->entries, 1);
+        QCOMPARE(learned->lastMs, qint64(26000));
+        QCOMPARE(describeLearnedTiming(*learned), QStringLiteral("Last time: 0:26"));
+        QVERIFY(history.record(QStringLiteral("Gaming PC"), 34000));
+        QVERIFY(history.record(QStringLiteral("Gaming PC"), 30000));
+        learned = history.learned(QStringLiteral("Gaming PC"));
+        QCOMPARE(learned->entries, 3);
+        QCOMPARE(learned->typicalMs, qint64(30000));
+        QCOMPARE(learned->longerAfterMs, qint64(60000));  // twice 0:30
+        QCOMPARE(describeLearnedTiming(*learned), QStringLiteral("Usually ready about 0:30 after the wake request (last 3 runs)"));
+        // Names and times only.
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+        QCOMPARE(root.value(QStringLiteral("computers")).toObject().keys(), QStringList{QStringLiteral("gaming pc")});
+        const QJsonObject entry = root.value(QStringLiteral("computers")).toObject().value(QStringLiteral("gaming pc")).toArray().first().toObject();
+        QCOMPARE(entry.keys(), (QStringList{QStringLiteral("at"), QStringLiteral("ms")}));
+    }
+
+    void historyKeepsTwentyAndTakesTheMedianOfTen() {
+        QTemporaryDir dir;
+        const TimingHistory history(dir.filePath(QStringLiteral("history.json")));
+        for (int i = 1; i <= 25; ++i) QVERIFY(history.record(QStringLiteral("PC"), i * 1000));
+        const auto entries = history.entries(QStringLiteral("PC"));
+        QCOMPARE(entries.size(), std::size_t(20));
+        QCOMPARE(entries.front().ms, qint64(6000));  // the oldest five are gone
+        QCOMPARE(entries.back().ms, qint64(25000));
+        const auto learned = history.learned(QStringLiteral("PC"));
+        QCOMPARE(learned->entries, 20);
+        QCOMPARE(learned->medianOf, 10);
+        QCOMPARE(learned->typicalMs, qint64(20500));  // median of 16..25 s
+        QCOMPARE(describeLearnedTiming(*learned), QStringLiteral("Usually ready about 0:20 after the wake request (last 10 runs)"));
+    }
+
+    void historyNormalizesNames() {
+        QCOMPARE(TimingHistory::key(QStringLiteral("  Living Room PC ")), QStringLiteral("living room pc"));
+        QTemporaryDir dir;
+        const TimingHistory history(dir.filePath(QStringLiteral("history.json")));
+        QVERIFY(history.record(QStringLiteral("  Living Room PC "), 1000));
+        QVERIFY(history.record(QStringLiteral("LIVING ROOM PC"), 3000));
+        QCOMPARE(history.entries(QStringLiteral("living room pc")).size(), std::size_t(2));
+    }
+
+    void historyUnreadableFileIsEmptyAndReplaced() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("history.json"));
+        for (const QByteArray& garbage : {QByteArray("this is not json"), QByteArray("[1, 2]"),
+                                          QByteArray("{\"computers\": {\"pc\": [{\"at\": \"never\", \"ms\": 5}, {\"ms\": -1}]}}")}) {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            file.write(garbage);
+            file.close();
+            const TimingHistory history(path);
+            QVERIFY(!history.learned(QStringLiteral("pc")).has_value());
+            QVERIFY(history.record(QStringLiteral("PC"), 12000));
+            QCOMPARE(history.entries(QStringLiteral("pc")).size(), std::size_t(1));
+            QCOMPARE(TimingHistory(path).learned(QStringLiteral("PC"))->lastMs, qint64(12000));
+        }
+    }
+
+    void historyRenameAndRemove() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("history.json"));
+        const TimingHistory history(path);
+        QVERIFY(history.record(QStringLiteral("Old Name"), 20000));
+        QVERIFY(history.record(QStringLiteral("Other"), 40000));
+        QVERIFY(history.rename(QStringLiteral("old name"), QStringLiteral("New Name")));
+        QVERIFY(history.entries(QStringLiteral("Old Name")).empty());
+        QCOMPARE(history.entries(QStringLiteral("new name")).size(), std::size_t(1));
+        // Renaming onto another computer replaces that one's history.
+        QVERIFY(history.rename(QStringLiteral("New Name"), QStringLiteral("Other")));
+        QCOMPARE(history.learned(QStringLiteral("Other"))->lastMs, qint64(20000));
+        QVERIFY(history.entries(QStringLiteral("New Name")).empty());
+        QVERIFY(history.rename(QStringLiteral("Other"), QStringLiteral("OTHER")));  // same key: nothing moves
+        QCOMPARE(history.entries(QStringLiteral("other")).size(), std::size_t(1));
+        QVERIFY(history.remove(QStringLiteral("other")));
+        QVERIFY(!history.learned(QStringLiteral("Other")).has_value());
+        QVERIFY(history.remove(QStringLiteral("Nobody")));
+        // Removing from a history that does not exist creates no file.
+        const QString absent = dir.filePath(QStringLiteral("work.history.json"));
+        QVERIFY(TimingHistory(absent).remove(QStringLiteral("PC")));
+        QVERIFY(!QFile::exists(absent));
     }
 };
 
