@@ -164,6 +164,19 @@ private slots:
         QCOMPARE(describe(*restored->wake), QStringLiteral("9 packets to every local network of this Mac (ports 9 x3, 7 x3, 12 x3)"));
         QCOMPARE(describeResend(*restored->wake), QStringLiteral("sent once"));
         QCOMPARE(describeResend(*fullProfile().wake), QStringLiteral("again every 15 s while waiting"));
+
+        // A hand edit that changes only the mode keeps the old destination: it is
+        // ignored and written back empty (review finding D; was rejected before).
+        QJsonObject edited = toJson(fullProfile());
+        QJsonObject wake = edited.value(QStringLiteral("wake")).toObject();
+        QVERIFY(!wake.value(QStringLiteral("destination")).toString().isEmpty());
+        wake[QStringLiteral("destinationMode")] = QStringLiteral("localNetworks");
+        edited[QStringLiteral("wake")] = wake;
+        const auto handEdited = profileFromJson(edited, &error);
+        QVERIFY2(handEdited.has_value(), qPrintable(error));
+        QCOMPARE(handEdited->wake->destinationMode, WakeDestination::LocalNetworks);
+        QVERIFY(handEdited->wake->target.destination.empty());
+        QCOMPARE(toJson(*handEdited).value(QStringLiteral("wake")).toObject().value(QStringLiteral("destination")).toString(), QString());
     }
 
     void invalidJsonIsRejectedWithAReason_data() {
@@ -191,7 +204,6 @@ private slots:
         QTest::newRow("schema zero") << QByteArray(R"({"schemaVersion": 0, "name": "X", "check": {"host": "h"}})") << QStringLiteral("schemaVersion");
         // Schema version 2: the destination mode and the resend interval.
         QTest::newRow("bad destination mode") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "destinationMode": "everywhere"}})") << QStringLiteral("destinationMode");
-        QTest::newRow("local networks with a destination") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "destinationMode": "localNetworks"}})") << QStringLiteral("must be empty");
         QTest::newRow("address mode without destination") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destinationMode": "address"}})") << QStringLiteral("destination");
         QTest::newRow("resend below 5") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "resendSeconds": 4}})") << QStringLiteral("resendSeconds");
         QTest::newRow("resend above 600") << QByteArray(R"({"name": "X", "check": {"host": "h"}, "wake": {"mac": "00:00:5E:00:53:2A", "destination": "d", "resendSeconds": 601}})") << QStringLiteral("resendSeconds");

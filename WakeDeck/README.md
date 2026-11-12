@@ -130,7 +130,7 @@ A profile is the whole configuration of one computer. The file is plain JSON, on
 }
 ```
 
-`destinationMode` is `"address"` (the default) or `"localNetworks"`; with `"localNetworks"` the `destination` is not used and is stored empty, and a destination given anyway is reported as a mistake. `resendSeconds` is 0 (send once) or 5 to 600, default 15.
+`destinationMode` is `"address"` (the default) or `"localNetworks"`; with `"localNetworks"` the `destination` is not used: one left in the file, for example after changing only the mode by hand, is ignored and written back empty. On the command line `--to` and `--local-networks` still exclude each other. `resendSeconds` is 0 (send once) or 5 to 600, default 15.
 
 The file format has a version. WakeDeck 1.2 writes version 2, the store and every profile in it, which adds `destinationMode` and `resendSeconds`; it reads version 1 files, from WakeDeck 1.0 and 1.1, with those two at their defaults. Because 1.0 and 1.1 refuse version 2 files, the first save that replaces a version 1 file first copies it to `profiles.v1-backup.json` in the same folder; that copy is made once and never overwritten, so it stays the file the older versions can read. Exported profiles are version 2 too.
 

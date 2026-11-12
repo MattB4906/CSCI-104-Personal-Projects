@@ -137,10 +137,11 @@ std::optional<WakeConfig> wakeFromJson(const QJsonValue& value, QString* error) 
         *error = QStringLiteral("wake.destination is required (an address or host name)");
         return std::nullopt;
     }
-    if (mode == WakeDestination::LocalNetworks && !target.destination.empty()) {
-        // Contradictory settings are reported, as with the client's rules.
-        *error = QStringLiteral("wake.destination must be empty when wake.destinationMode is \"localNetworks\"");
-        return std::nullopt;
+    if (mode == WakeDestination::LocalNetworks) {
+        // Not used in this mode. A destination left over from a hand edit that only
+        // changed the mode is ignored and written back empty, rather than losing
+        // the whole profile.
+        target.destination.clear();
     }
     if (object.contains(QLatin1String("ports"))) {
         const QJsonValue ports = object.value(QLatin1String("ports"));
