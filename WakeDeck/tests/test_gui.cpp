@@ -11,11 +11,13 @@
 #include <QLineEdit>
 #include <QProcess>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -26,8 +28,11 @@
 #include <vector>
 
 #include "agent_bundle.h"
+#include "app/Diagnose.h"
 #include "app/MainWindow.h"
 #include "app/ProfileEditorDialog.h"
+#include "app/SystemServices.h"
+#include "app/WaitProgress.h"
 #include "engine/ClientLauncher.h"
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
@@ -152,6 +157,55 @@ bool processGone(qint64 pid) {
 bool waitForRun(MainWindow& window, std::optional<Outcome>& outcome, int timeoutMs = 5000) {
     QObject::connect(&window, &MainWindow::runFinished, [&outcome](Outcome o) { outcome = o; });
     return QTest::qWaitFor([&outcome] { return outcome.has_value(); }, timeoutMs);
+}
+
+// What the fake notifier and the fake Dock progress were asked to do.
+struct SystemLog {
+    std::vector<std::pair<QString, QString>> notifications;  // title, body
+    std::vector<double> dock;                                // fractions; kDockCleared for clear()
+    bool refuse = false;                                     // the fake system says notifications are off
+    bool active = false;                                     // WakeDeck is the active application
+};
+constexpr double kDockCleared = -1.0;
+
+class FakeNotifier final : public wakedeck::app::Notifier {
+public:
+    explicit FakeNotifier(std::shared_ptr<SystemLog> log) : log_(std::move(log)) {}
+    bool available() const override { return true; }
+    void notify(const QString& title, const QString& body) override {
+        log_->notifications.emplace_back(title, body);
+        if (log_->refuse) {
+            // Later, as the real one would; twice, to show the window says it once.
+            QTimer::singleShot(0, this, [this] { emit refused(); });
+            QTimer::singleShot(0, this, [this] { emit refused(); });
+        }
+    }
+
+private:
+    std::shared_ptr<SystemLog> log_;
+};
+
+class FakeDockProgress final : public wakedeck::app::DockProgress {
+public:
+    explicit FakeDockProgress(std::shared_ptr<SystemLog> log) : log_(std::move(log)) {}
+    void setProgress(double fraction) override { log_->dock.push_back(fraction); }
+    void clear() override { log_->dock.push_back(kDockCleared); }
+
+private:
+    std::shared_ptr<SystemLog> log_;
+};
+
+std::shared_ptr<SystemLog> useFakeSystem(MainWindow& window) {
+    auto log = std::make_shared<SystemLog>();
+    window.setNotifier(std::make_unique<FakeNotifier>(log));
+    window.setDockProgress(std::make_unique<FakeDockProgress>(log));
+    window.setAppActivePredicate([log] { return log->active; });
+    window.setNotifyWhenReady(true);
+    return log;
+}
+
+int countOf(const std::vector<double>& values, double value) {
+    return static_cast<int>(std::count(values.begin(), values.end(), value));
 }
 
 }  // namespace
@@ -949,6 +1003,293 @@ private slots:
         QCOMPARE(dialog.findChild<QSpinBox*>(QStringLiteral("resendSpin"))->value(), 15);
         dialog.findChild<QCheckBox*>(QStringLiteral("wakeEnabled"))->setChecked(true);
         QVERIFY(dialog.findChild<QLineEdit*>(QStringLiteral("destinationEdit"))->isEnabled());
+    }
+
+    // ---- Notification and progress ----
+
+    void notifyOptionIsInTheRunMenuAndRemembered() {
+        QSettings().remove(QLatin1String(MainWindow::kNotifyWhenReadyKey));
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        {
+            MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+            auto* action = window.findChild<QAction*>(QStringLiteral("notifyWhenReadyAction"));
+            QVERIFY(action != nullptr);
+            QVERIFY(action->isCheckable());
+            QCOMPARE(action->text(), QStringLiteral("&Notify When Ready"));
+            QVERIFY(action->isChecked());  // on by default
+            action->trigger();
+            QVERIFY(!window.notifyWhenReady());
+        }
+        QCOMPARE(QSettings().value(QLatin1String(MainWindow::kNotifyWhenReadyKey)).toBool(), false);
+        {
+            MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+            QVERIFY(!window.notifyWhenReady());
+            window.setNotifyWhenReady(true);
+        }
+        MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+        QVERIFY(window.notifyWhenReady());
+    }
+
+    void notifiesHowEachRunEndedWhenInactive() {
+        struct Case {
+            Outcome expected;
+            bool withWake;
+            bool withClient;
+            std::vector<ProbeStatus> statuses;
+            bool wakeOk;
+            bool launchOk;
+            int overallTimeoutMs;
+            QString title;
+            QString bodyStart;
+        };
+        const std::vector<Case> cases = {
+            {Outcome::ReadyWithoutWake, true, true, {ProbeStatus::Ready}, true, true, 2000, QStringLiteral("PC is ready"),
+             QStringLiteral("Service was already ready")},
+            {Outcome::ReadyAfterWake, true, false, {ProbeStatus::TimedOut, ProbeStatus::Ready}, true, true, 2000,
+             QStringLiteral("PC is ready"), QStringLiteral("Service ready")},
+            {Outcome::TimedOut, true, false, {ProbeStatus::TimedOut}, true, true, 60, QStringLiteral("PC did not answer"),
+             QStringLiteral("No answer from")},
+            {Outcome::WakeFailed, true, false, {ProbeStatus::TimedOut}, false, true, 2000, QStringLiteral("Could not wake PC"),
+             QStringLiteral("The wake request could not be sent")},
+            {Outcome::LaunchFailed, false, true, {ProbeStatus::Ready}, true, false, 2000,
+             QStringLiteral("PC is ready, but the client did not open"), QStringLiteral("The service answered, but the client")},
+        };
+        for (const Case& c : cases) {
+            QTemporaryDir dir;
+            const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+            Profile profile = sampleProfile(QStringLiteral("PC"), c.withWake, c.withClient);
+            profile.overallTimeoutMs = c.overallTimeoutMs;
+            QVERIFY(store.save({profile}, nullptr));
+            auto script = std::make_shared<Script>();
+            script->statuses = c.statuses;
+            script->wakeOk = c.wakeOk;
+            script->launchOk = c.launchOk;
+            MainWindow window(store, fakeFactories(script));
+            const auto log = useFakeSystem(window);
+            std::optional<Outcome> outcome;
+            window.startWakeAndConnect();
+            QVERIFY(waitForRun(window, outcome));
+            QCOMPARE(*outcome, c.expected);
+            QCOMPARE(log->notifications.size(), std::size_t(1));
+            QCOMPARE(log->notifications[0].first, c.title);
+            const QString body = log->notifications[0].second;
+            QVERIFY2(body.startsWith(c.bodyStart), qPrintable(body));
+            QVERIFY2(body.endsWith(QLatin1Char('.')) && !body.contains(QLatin1Char('\n')), qPrintable(body));
+        }
+    }
+
+    void noNotificationWhenActiveOffCancelledOrForSingleSteps() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), true, true);
+        profile.overallTimeoutMs = 10000;
+        QVERIFY(store.save({profile}, nullptr));
+        auto script = std::make_shared<Script>();
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        auto run = [&window] {
+            std::optional<Outcome> outcome;
+            QObject::connect(&window, &MainWindow::runFinished, &window, [&outcome](Outcome o) { outcome = o; },
+                             Qt::SingleShotConnection);
+            window.startWakeAndConnect();
+            return QTest::qWaitFor([&outcome] { return outcome.has_value(); }, 5000) ? outcome : std::nullopt;
+        };
+
+        log->active = true;  // the user is looking at WakeDeck
+        QCOMPARE(run(), std::optional<Outcome>(Outcome::ReadyWithoutWake));
+        log->active = false;
+        window.setNotifyWhenReady(false);
+        QCOMPARE(run(), std::optional<Outcome>(Outcome::ReadyWithoutWake));
+        window.setNotifyWhenReady(true);
+
+        script->statuses = {ProbeStatus::TimedOut};
+        QTimer::singleShot(50, &window, [&window] { window.cancelRun(); });
+        QCOMPARE(run(), std::optional<Outcome>(Outcome::Cancelled));
+
+        QSignalSpy steps(&window, &MainWindow::stepFinished);
+        window.startCheckOnly();
+        QTRY_COMPARE_WITH_TIMEOUT(steps.count(), 1, 5000);
+        window.startWakeOnly();
+        QTRY_COMPARE_WITH_TIMEOUT(steps.count(), 2, 5000);
+        window.startOpenClient();
+        QTRY_COMPARE_WITH_TIMEOUT(steps.count(), 3, 5000);
+        QTest::qWait(50);
+        QVERIFY(log->notifications.empty());
+
+        script->statuses = {ProbeStatus::Ready};  // the same window still notifies when it should
+        QCOMPARE(run(), std::optional<Outcome>(Outcome::ReadyWithoutWake));
+        QCOMPARE(log->notifications.size(), std::size_t(1));
+    }
+
+    void switchedOffNotificationsAreNotedOncePerLaunch() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        log->refuse = true;
+        const QString line = QStringLiteral("Notifications are switched off for WakeDeck (System Settings ▸ Notifications)");
+
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QTRY_COMPARE_WITH_TIMEOUT(window.timelineTexts().filter(line).size(), 1, 2000);
+        QTest::qWait(50);
+        QCOMPARE(window.timelineTexts().filter(line).size(), 1);
+
+        outcome.reset();
+        window.startWakeAndConnect();  // a new timeline; the note is not repeated
+        QVERIFY(QTest::qWaitFor([&outcome] { return outcome.has_value(); }, 5000));
+        QTest::qWait(50);
+        QCOMPARE(log->notifications.size(), std::size_t(2));
+        QVERIFY2(window.timelineTexts().filter(line).isEmpty(), qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
+    }
+
+    void progressIsShownWhileWaitingAndClearedAtTheEnd() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), true, false);
+        profile.overallTimeoutMs = 1300;  // long enough for one update after the first
+        QVERIFY(store.save({profile}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        QVERIFY(!window.progressVisible());
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QTRY_VERIFY_WITH_TIMEOUT(window.progressVisible(), 2000);
+        QVERIFY2(QRegularExpression(QStringLiteral("^0:0\\d of up to 0:01$")).match(window.progressText()).hasMatch(),
+                 qPrintable(window.progressText()));
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::TimedOut);
+        QVERIFY(!window.progressVisible());
+        QVERIFY(window.progressText().isEmpty());
+        QCOMPARE(window.progressPermille(), 0);
+
+        QVERIFY2(log->dock.size() >= 3, qPrintable(QString::number(log->dock.size())));  // start, one tick, clear
+        QCOMPARE(log->dock.back(), kDockCleared);
+        QCOMPARE(countOf(log->dock, kDockCleared), 1);
+        double previous = 0.0;
+        for (std::size_t i = 0; i + 1 < log->dock.size(); ++i) {
+            QVERIFY(log->dock[i] >= previous);
+            QVERIFY(log->dock[i] <= wakedeck::app::kMaxWaitFraction);
+            previous = log->dock[i];
+        }
+        QVERIFY2(previous > 0.5, qPrintable(QString::number(previous)));  // about 1 s of 1.3 s
+    }
+
+    void progressAlsoWhenWaitingWithoutWake() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), false, false)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Refused, ProbeStatus::Refused, ProbeStatus::Ready};
+        script->probeDelayMs = 20;
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        bool seen = false;
+        QTimer poll;
+        QObject::connect(&poll, &QTimer::timeout, &window, [&] { seen = seen || window.progressVisible(); });
+        poll.start(5);
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QVERIFY(seen);
+        QVERIFY(!window.progressVisible());
+        QVERIFY(log->dock.size() >= 2);
+        QVERIFY(log->dock.front() < 0.1);
+        QCOMPARE(log->dock.back(), kDockCleared);
+    }
+
+    void noProgressWhenTheFirstCheckSucceeds() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::ReadyWithoutWake);
+        QVERIFY(log->dock.empty());
+        QVERIFY(!window.progressVisible());
+    }
+
+    void closingTheWindowClearsTheProgress() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), true, false);
+        profile.overallTimeoutMs = 10000;
+        QVERIFY(store.save({profile}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        window.startWakeAndConnect();
+        QTRY_VERIFY_WITH_TIMEOUT(window.progressVisible(), 2000);
+        QVERIFY2(window.progressText().endsWith(QStringLiteral("of up to 0:10")), qPrintable(window.progressText()));
+        window.keepWaiting();  // the limit grows by a minute
+        QVERIFY2(window.progressText().endsWith(QStringLiteral("of up to 1:10")), qPrintable(window.progressText()));
+        window.close();  // never shown, so the test application is not asked to quit
+        QVERIFY(!window.progressVisible());
+        QCOMPARE(log->dock.back(), kDockCleared);
+        std::optional<Outcome> outcome;
+        QTimer::singleShot(0, &window, [&window] { window.cancelRun(); });
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(countOf(log->dock, kDockCleared), 1);
+    }
+
+    void waitProgressFunction() {
+        using wakedeck::app::waitProgress;
+        QCOMPARE(waitProgress(0, 0, 120000).fraction, 0.0);
+        QCOMPARE(waitProgress(0, 0, 120000).text, QStringLiteral("0:00 of up to 2:00"));
+        QCOMPARE(waitProgress(12000, 0, 120000).fraction, 0.1);
+        QCOMPARE(waitProgress(12000, 0, 120000).text, QStringLiteral("0:12 of up to 2:00"));
+        QCOMPARE(waitProgress(114000, 0, 120000).fraction, 0.95);
+        QCOMPARE(waitProgress(119999, 0, 120000).fraction, 0.95);  // never full while still waiting
+        QCOMPARE(waitProgress(300000, 0, 120000).fraction, 0.95);
+        QCOMPARE(waitProgress(300000, 0, 120000).text, QStringLiteral("5:00 of up to 2:00"));
+        QCOMPARE(waitProgress(-500, 0, 120000).fraction, 0.0);
+        QCOMPARE(waitProgress(5000, 0, 0).fraction, 0.0);
+        // With a typical time the fraction runs against it instead of the limit.
+        QCOMPARE(waitProgress(15000, 30000, 120000).fraction, 0.5);
+        QCOMPARE(waitProgress(12000, 30000, 120000).text, QStringLiteral("usually about 0:30 — 0:12 so far"));
+        QCOMPARE(waitProgress(45000, 30000, 120000).fraction, 0.95);
+    }
+
+    void diagnoseWritesItsReportWithoutTheSystemServices() {
+        using wakedeck::app::diagnoseTarget;
+        QCOMPARE(diagnoseTarget({QStringLiteral("WakeDeck")}), std::optional<QString>());
+        QCOMPARE(diagnoseTarget({QStringLiteral("WakeDeck"), QStringLiteral("--diagnose"), QStringLiteral("/tmp/x.txt")}),
+                 std::optional<QString>(QStringLiteral("/tmp/x.txt")));
+        QCOMPARE(diagnoseTarget({QStringLiteral("WakeDeck"), QStringLiteral("--diagnose")}), std::optional<QString>(QString()));
+
+        // On the offscreen platform: nothing of the system's is asked, the
+        // picture is still drawn.
+        QTemporaryDir dir;
+        const QString report = dir.filePath(QStringLiteral("diagnose.txt"));
+        QCOMPARE(wakedeck::app::runDiagnose(report), 0);
+        QFile file(report);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        QCOMPARE(lines.size(), 5);
+        QVERIFY(lines[0].startsWith(QStringLiteral("version=")));
+        QCOMPARE(lines[1], QStringLiteral("platform=offscreen"));
+        QCOMPARE(lines[2], QStringLiteral("bundleId=none"));
+        QCOMPARE(lines[3], QStringLiteral("notifications=unavailable"));
+        QCOMPARE(lines[4], QStringLiteral("dockTile=unavailable"));
+        QFile picture(report + QStringLiteral(".dock.png"));
+        QVERIFY(picture.open(QIODevice::ReadOnly));
+        QCOMPARE(picture.read(8), QByteArray("\x89PNG\r\n\x1a\n", 8));
+        QVERIFY(picture.size() > 1000);
+
+        QVERIFY(wakedeck::app::runDiagnose(dir.filePath(QStringLiteral("no-such-folder/diagnose.txt"))) != 0);
+        QVERIFY(wakedeck::app::runDiagnose(QString()) != 0);
     }
 
     // ---- Editor ----
