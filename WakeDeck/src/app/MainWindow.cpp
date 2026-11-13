@@ -974,6 +974,8 @@ TimingHistory MainWindow::timingHistory() const {
 }
 
 qint64 MainWindow::typicalWaitMs(const Profile& profile) const {
+    // The learned time runs from the wake request: without one it says nothing.
+    if (!profile.wake) return 0;
     const auto learned = timingHistory().learned(profile.name);
     return learned ? learned->typicalMs : 0;  // 0: not learned yet
 }
