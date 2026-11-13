@@ -100,9 +100,14 @@ public:
 
     void start();
     void cancel();
-    void extendTimeout(int extraMs);  // "Keep waiting"
+    // "Keep waiting". False, and nothing changes, once the run has finished or
+    // has timed out and is only reading Tailscale once more before finishing.
+    bool extendTimeout(int extraMs);
 
     SessionState state() const { return state_; }
+    // Timed out; still in Waiting while Tailscale is read once more, but the
+    // wait is over and extendTimeout() is refused.
+    bool concluding() const { return concluding_; }
     const Observations& observations() const { return observations_; }
     // After a successful launch: the client's process ids as its launcher reported
     // them (0: none or unknown, see Launcher) and its description of the client.

@@ -123,17 +123,20 @@ struct Script {
     // Tailscale: one status per read (the last one repeats); empty: the factory returns no reader.
     std::vector<TailscaleStatus> tailscale;
     int readersCreated = 0;
+    int lateReadMs = 0;  // how long the second and later reads take
 };
 
 class FakeTailscaleReader final : public TailscaleReader {
 public:
-    FakeTailscaleReader(TailscaleStatus status, QObject* parent) : TailscaleReader(parent), status_(std::move(status)) {}
+    FakeTailscaleReader(TailscaleStatus status, QObject* parent, int delayMs = 0)
+        : TailscaleReader(parent), status_(std::move(status)), delayMs_(delayMs) {}
     void start() override {
-        QTimer::singleShot(0, this, [this] { emit finished(status_); });
+        QTimer::singleShot(delayMs_, this, [this] { emit finished(status_); });
     }
 
 private:
     TailscaleStatus status_;
+    int delayMs_;
 };
 
 // Counts how many wake requests are in flight at once and answers after a delay.
@@ -198,7 +201,7 @@ SessionFactories fakeFactories(const std::shared_ptr<Script>& script) {
         ++script->readersCreated;
         if (script->tailscale.empty()) return nullptr;
         const std::size_t index = std::min(static_cast<std::size_t>(script->readersCreated - 1), script->tailscale.size() - 1);
-        return new FakeTailscaleReader(script->tailscale[index], parent);
+        return new FakeTailscaleReader(script->tailscale[index], parent, script->readersCreated > 1 ? script->lateReadMs : 0);
     };
     return factories;
 }
@@ -1336,6 +1339,33 @@ private slots:
             QVERIFY2(run.summary.contains(c.expected), qPrintable(run.summary));
             QCOMPARE(script->readersCreated, 2);
         }
+    }
+
+    void keepWaitingIsRefusedOnceTimedOut() {
+        // The second Tailscale read answers late; meanwhile the run has timed out
+        // and stays in Waiting, but the wait cannot be extended any more.
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->tailscale = {tailscaleWithPc(false)};
+        script->lateReadMs = 400;
+        SessionConfig config = tailscaleConfig();
+        config.overallTimeoutMs = 60;
+        Session session(config, fakeFactories(script));
+        std::optional<bool> concludingAtTimeout;
+        std::optional<bool> extended;
+        connect(&session, &Session::timelineEvent, &session, [&](const TimelineEvent& e) {
+            if (!e.text.startsWith(QStringLiteral("Timed out after"))) return;
+            concludingAtTimeout = session.concluding();
+            extended = session.extendTimeout(60000);
+        });
+        QVERIFY(session.extendTimeout(0) == false);  // nothing to add
+        const Run run = runSession(session);
+        QVERIFY(run.outcome.has_value());
+        QCOMPARE(*run.outcome, Outcome::TimedOut);
+        QCOMPARE(concludingAtTimeout, std::optional<bool>(true));
+        QCOMPARE(extended, std::optional<bool>(false));
+        QCOMPARE(script->readersCreated, 2);
+        QVERIFY(!session.extendTimeout(60000));  // finished
     }
 
     void sessionWithoutATailscaleAnswerIsUnchanged() {

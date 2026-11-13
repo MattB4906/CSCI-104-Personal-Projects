@@ -125,9 +125,12 @@ void Session::readTailscale() {
 
 void Session::concludeTimeout() {
     observations_.elapsedMs = elapsedMs();
+    // Set before the line goes out, so whoever shows it already sees that the
+    // run is over: no more checks, resends or "Keep waiting".
+    if (tailscaleAnswered_) concluding_ = true;
     emitEvent(EventKind::Failure, QStringLiteral("Timed out after %1").arg(formatDuration(elapsedMs())));
-    if (tailscaleAnswered_) {
-        concluding_ = true;  // no more checks or resends; read Tailscale once more, then finish
+    if (concluding_) {
+        // Read Tailscale once more, then finish.
         if (resendTimer_) resendTimer_->stop();
         readTailscale();
         return;
@@ -141,8 +144,10 @@ void Session::cancel() {
     finish(Outcome::Cancelled, QStringLiteral("Cancelled after %1.").arg(formatDuration(elapsedMs())));
 }
 
-void Session::extendTimeout(int extraMs) {
-    if (extraMs > 0) config_.overallTimeoutMs += extraMs;
+bool Session::extendTimeout(int extraMs) {
+    if (finished_ || concluding_ || extraMs <= 0) return false;  // too late: the run has timed out
+    config_.overallTimeoutMs += extraMs;
+    return true;
 }
 
 int Session::elapsedMs() const {
