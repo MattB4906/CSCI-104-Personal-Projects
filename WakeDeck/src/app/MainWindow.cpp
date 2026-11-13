@@ -698,8 +698,10 @@ void MainWindow::startCheckOnly() {
     begin.at = QDateTime::currentDateTime();
     begin.text = QStringLiteral("Checking %1").arg(describe(profile->check));
     appendTimeline(begin);
-    Probe* probe = factoriesFor_(*profile).probe(profile->check, this);
-    connect(probe, &Probe::finished, this, [this, probe](const ProbeResult& result) {
+    const SessionFactories factories = factoriesFor_(*profile);
+    Probe* probe = factories.probe(profile->check, this);
+    const QString host = profile->check.host;
+    connect(probe, &Probe::finished, this, [this, probe, host, tailscale = factories.tailscale](const ProbeResult& result) {
         probe->deleteLater();
         TimelineEvent event;
         event.at = QDateTime::currentDateTime();
@@ -709,8 +711,22 @@ void MainWindow::startCheckOnly() {
         appendTimeline(event);
         serviceStatus_->setText(result.ready() ? QStringLiteral("ready at %1 (%2)").arg(stamp(event.at), result.detail)
                                                : QStringLiteral("not ready: %1 (%2)").arg(statusName(result.status), result.detail));
-        endStep();
-        emit checkFinished(result.ready());
+        // Not ready on a Tailscale host: one more line with what Tailscale shows,
+        // as `check` prints it; nothing when the tool gives no answer.
+        TailscaleReader* reader = !result.ready() && looksLikeTailscale(host) && tailscale ? tailscale(this) : nullptr;
+        if (!reader) {
+            endStep();
+            emit checkFinished(result.ready());
+            return;
+        }
+        connect(reader, &TailscaleReader::finished, this, [this, reader, host](const TailscaleStatus& status) {
+            reader->deleteLater();
+            const QString line = describeTailscale(status, host);
+            if (!line.isEmpty()) note(line);
+            endStep();
+            emit checkFinished(false);
+        });
+        reader->start();
     });
     probe->start();
 }
