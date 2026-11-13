@@ -630,9 +630,10 @@ void MainWindow::onSessionFinished(Outcome outcome, const QString& summary) {
     qint64 runningPid = 0;
     QString launchedClient;
     if (session_) {
-        if (outcome == Outcome::ReadyAfterWake && session_->wakeToReadyMs()) {
-            // Learned timing: only a run that ended ready after a wake request is
-            // remembered; the history is disposable, so a failure is only noted.
+        if ((outcome == Outcome::ReadyAfterWake || outcome == Outcome::LaunchFailed) && session_->wakeToReadyMs()) {
+            // Learned timing: a run whose service answered after a wake request is
+            // remembered, also when the client then did not open (the time is the
+            // computer's); the history is disposable, so a failure is only noted.
             QString why;
             if (!timingHistory().record(runProfileName_, *session_->wakeToReadyMs(), QDateTime::currentDateTimeUtc(), &why)) {
                 note(QStringLiteral("Could not remember how long this took: %1").arg(why));

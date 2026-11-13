@@ -179,7 +179,9 @@ int runConnect(int argc, char** argv, const std::vector<std::string>& args) {
     });
     QObject::connect(&session, &Session::finished, &app, [&](Outcome outcome, const QString& summary) {
         std::cout << "\nResult: " << outcomeName(outcome).toStdString() << "\n" << summary.toStdString() << std::endl;
-        if (outcome == Outcome::ReadyAfterWake && !historyPath.isEmpty() && session.wakeToReadyMs()) {
+        // Also when the client then failed: the time is about the computer.
+        if ((outcome == Outcome::ReadyAfterWake || outcome == Outcome::LaunchFailed) && !historyPath.isEmpty() &&
+            session.wakeToReadyMs()) {
             QString error;
             if (!TimingHistory(historyPath).record(profileName, *session.wakeToReadyMs(), QDateTime::currentDateTimeUtc(), &error)) {
                 std::cerr << "warning: could not remember how long this took: " << error.toStdString() << "\n";
