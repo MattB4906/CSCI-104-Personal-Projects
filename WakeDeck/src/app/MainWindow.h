@@ -112,6 +112,7 @@ public:
     bool explanationVisible() const;
     bool locateOffered() const;
     QString wakeDetailsText() const;  // the selected computer's "Wake:" line in the details pane
+    static QString howWakingWorksText();  // Help ▸ How Waking Works
     // How long each computer took from the wake request to ready, in the file
     // beside the profiles store (TimingHistory::pathBeside).
     TimingHistory timingHistory() const;

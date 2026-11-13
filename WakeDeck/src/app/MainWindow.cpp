@@ -1079,24 +1079,45 @@ QString MainWindow::wakeDetailsText() const { return wakeLabel_->text(); }
 
 // ---- Help -------------------------------------------------------------------
 
+QString MainWindow::howWakingWorksText() {
+    QStringList paragraphs;
+    paragraphs << QStringLiteral(
+        "A wake request is a \"magic packet\": a small UDP message that holds the computer's MAC address sixteen "
+        "times. A sleeping computer has no working network address, so the packet has to reach its own network "
+        "segment, normally as a broadcast on that LAN, where the network card recognises it and powers the machine on.");
+    paragraphs << QStringLiteral(
+        "Same network: send to the network's broadcast address, for example 192.168.1.255, or choose \"Every local "
+        "network this Mac is on\": WakeDeck then reads this Mac's network connections each time it sends and uses the "
+        "broadcast address of every one that can broadcast, leaving out VPN tunnels. Most Wi-Fi adapters cannot wake a "
+        "powered-off computer; Ethernet usually can.");
+    paragraphs << QStringLiteral(
+        "Sending again: while WakeDeck waits for the service it sends the whole wake request again every %1 seconds by "
+        "default (\"Send again every\" in the editor), in case the first packets were missed, until the service "
+        "answers, the time limit is reached or you cancel.")
+                      .arg(WakeConfig::kDefaultResendSeconds);
+    paragraphs << QStringLiteral(
+        "From elsewhere: the internet and VPNs route packets to running hosts and do not carry LAN broadcasts, and a "
+        "sleeping computer is not on your VPN at all. Something always on inside the home network has to emit the "
+        "broadcast for you: a router with a wake feature or a port forward, or a small always-on device that relays "
+        "the packet. WakeDeck sends to whatever destination you configure.");
+    paragraphs << QStringLiteral(
+        "Tailscale: when the address to check is a Tailscale one, WakeDeck runs Tailscale's own status command on this "
+        "Mac and reads its answer; nothing is stored or sent anywhere. If Tailscale is off on this Mac, the run stops "
+        "at once and says so. Otherwise the timeline says what Tailscale shows about the computer, and at a time-out "
+        "the explanation adds what it shows then, in Tailscale's name: it can take a while to notice that a computer "
+        "went to sleep.");
+    paragraphs << QStringLiteral(
+        "Learned time: WakeDeck remembers how long each computer took from the wake request to the service answering, "
+        "and from then on says how long it usually takes, shows the progress against that time and notes when a run "
+        "takes longer than usual. Only names and times are kept, beside your saved computers.");
+    paragraphs << QStringLiteral(
+        "WakeDeck always shows two separate facts: whether the wake request left this Mac, and whether the service "
+        "answered. Only the second one means the computer is ready.");
+    return paragraphs.join(QStringLiteral("\n\n"));
+}
+
 void MainWindow::showHowWakingWorks() {
-    QMessageBox::information(
-        this, QStringLiteral("How waking works"),
-        QStringLiteral(
-            "A wake request is a \"magic packet\": a small UDP message that holds the computer's MAC address sixteen "
-            "times. A sleeping computer has no working network address, so the packet has to reach its own network "
-            "segment, normally as a broadcast on that LAN, where the network card recognises it and powers the machine on.\n\n"
-            "Same network: send to the network's broadcast address, for example 192.168.1.255, or choose \"Every local "
-            "network this Mac is on\" and WakeDeck finds the broadcast addresses itself each time it sends. Most Wi-Fi "
-            "adapters cannot wake a powered-off computer; Ethernet usually can.\n\n"
-            "While WakeDeck waits for the service it sends the wake request again every 15 seconds by default (\"Send "
-            "again every\" in the editor), in case the first packets were missed.\n\n"
-            "From elsewhere: the internet and VPNs route packets to running hosts and do not carry LAN broadcasts, and a "
-            "sleeping computer is not on your VPN at all. Something always on inside the home network has to emit the "
-            "broadcast for you: a router with a wake feature or a port forward, or a small always-on device that relays "
-            "the packet. WakeDeck sends to whatever destination you configure.\n\n"
-            "WakeDeck always shows two separate facts: whether the wake request left this Mac, and whether the service "
-            "answered. Only the second one means the computer is ready."));
+    QMessageBox::information(this, QStringLiteral("How waking works"), howWakingWorksText());
 }
 
 void MainWindow::showAbout() {
