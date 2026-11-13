@@ -592,6 +592,7 @@ void MainWindow::startWakeAndConnect() {
 
 void MainWindow::onSessionEvent(const TimelineEvent& event) {
     appendTimeline(event);
+    if (session_ && session_->concluding()) keepWaitingButton_->setVisible(false);  // the wait is over
     switch (event.kind) {
     case EventKind::WakeSent:
         ++wakeSendCount_;
@@ -621,7 +622,7 @@ void MainWindow::onSessionEvent(const TimelineEvent& event) {
 }
 
 void MainWindow::onSessionState(SessionState state) {
-    keepWaitingButton_->setVisible(state == SessionState::Waiting);
+    keepWaitingButton_->setVisible(state == SessionState::Waiting && !(session_ && session_->concluding()));
     if (state == SessionState::Waking || state == SessionState::Waiting) startProgress();  // once per run
 }
 
@@ -857,7 +858,10 @@ void MainWindow::note(const QString& text, EventKind kind) {
 
 void MainWindow::keepWaiting() {
     if (session_) {
-        session_->extendTimeout(60000);
+        if (!session_->extendTimeout(60000)) {  // timed out already, only finishing
+            keepWaitingButton_->setVisible(false);
+            return;
+        }
         TimelineEvent note;
         note.at = QDateTime::currentDateTime();
         note.text = QStringLiteral("Waiting one more minute");
