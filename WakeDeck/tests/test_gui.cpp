@@ -105,18 +105,22 @@ struct Script {
     int probesCreated = 0;
     int wakersCreated = 0;
     QString tailscaleState;  // empty: no Tailscale reader; otherwise its state, with the computer online
+    int readersAsked = 0;    // how often the Tailscale factory was called
+    int lateReadMs = 0;      // how long the second and later reads take
     std::function<void()> onLaunch;  // runs when the fake launcher starts, e.g. a client taking the focus
 };
 
 class FakeTailscaleReader final : public TailscaleReader {
 public:
-    FakeTailscaleReader(TailscaleStatus status, QObject* parent) : TailscaleReader(parent), status_(std::move(status)) {}
+    FakeTailscaleReader(TailscaleStatus status, QObject* parent, int delayMs = 0)
+        : TailscaleReader(parent), status_(std::move(status)), delayMs_(delayMs) {}
     void start() override {
-        QTimer::singleShot(0, this, [this] { emit finished(status_); });
+        QTimer::singleShot(delayMs_, this, [this] { emit finished(status_); });
     }
 
 private:
     TailscaleStatus status_;
+    int delayMs_;
 };
 
 MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
@@ -140,6 +144,7 @@ MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
             factories.launcher = [script](QObject* parent) -> Launcher* { return new FakeLauncher(script->launchOk, script->launchPid, script->runningPid, parent, script->onLaunch); };
         }
         factories.tailscale = [script](QObject* parent) -> TailscaleReader* {
+            ++script->readersAsked;
             if (script->tailscaleState.isEmpty()) return nullptr;
             TailscaleStatus status;
             status.available = true;
@@ -149,7 +154,7 @@ MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
             peer.addresses = {QStringLiteral("100.64.0.10")};
             peer.online = true;
             status.peers.push_back(peer);
-            return new FakeTailscaleReader(status, parent);
+            return new FakeTailscaleReader(status, parent, script->readersAsked > 1 ? script->lateReadMs : 0);
         };
         return factories;
     };
@@ -1423,8 +1428,10 @@ private slots:
             QVERIFY(!window.addProfile(sampleProfile(QStringLiteral("New PC"), true, false), &error));
             QVERIFY2(error.contains(QStringLiteral("Nothing was changed")), qPrintable(error));
             QVERIFY(!window.loadExample(&error));
+            error.clear();
             QVERIFY(!window.updateProfile(QStringLiteral("Future PC"), sampleProfile(QStringLiteral("Other PC"), false, false), &error));
-            QVERIFY(!window.removeCurrentProfile(&error));
+            QVERIFY2(error.contains(QStringLiteral("Nothing was changed")), qPrintable(error));
+            // Removing needs a computer in the list, and a refused file lists none.
             QVERIFY(window.profiles().empty());
             QFile file(path);
             QVERIFY(file.open(QIODevice::ReadOnly));
@@ -1434,6 +1441,138 @@ private slots:
     }
 
     // ---- Learned timing and Tailscale in the window ----
+
+    void aFailedLaunchAfterAWakeIsRecorded() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("PC"), true, true)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut, ProbeStatus::Ready};
+        script->launchOk = false;
+        MainWindow window(store, fakeFactories(script));
+        std::optional<Outcome> outcome;
+        window.startWakeAndConnect();
+        QVERIFY(waitForRun(window, outcome));
+        QCOMPARE(*outcome, Outcome::LaunchFailed);
+        QCOMPARE(window.timingHistory().entries(QStringLiteral("PC")).size(), std::size_t(1));
+    }
+
+    void withoutAWakeTheProgressRunsAgainstTheLimit() {
+        // Learned times exist, but the wake was switched off since: the bar must
+        // not wait for a wake request that never comes.
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), false, false);
+        profile.overallTimeoutMs = 10000;
+        QVERIFY(store.save({profile}, nullptr));
+        const TimingHistory history(dir.filePath(QStringLiteral("history.json")));
+        for (int i = 0; i < 3; ++i) QVERIFY(history.record(QStringLiteral("PC"), 30000));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Refused};
+        script->probeDelayMs = 50;
+        MainWindow window(store, fakeFactories(script));
+        useFakeSystem(window);
+        window.setProgressIntervalMs(20);
+        window.startWakeAndConnect();
+        QTRY_VERIFY_WITH_TIMEOUT(window.progressVisible(), 2000);
+        QVERIFY2(window.progressText().endsWith(QStringLiteral(" of up to 0:10")), qPrintable(window.progressText()));
+        QTRY_VERIFY_WITH_TIMEOUT(window.progressText().startsWith(QStringLiteral("0:01 of up to 0:10")), 5000);  // it moves
+        QVERIFY(window.progressPermille() > 0);
+        std::optional<Outcome> outcome;
+        QTimer::singleShot(0, &window, [&window] { window.cancelRun(); });
+        QVERIFY(waitForRun(window, outcome));
+    }
+
+    void keepWaitingIsRefusedOnceTimedOut() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), true, false);
+        profile.check.host = QStringLiteral("100.64.0.10");
+        profile.overallTimeoutMs = 60;
+        QVERIFY(store.save({profile}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->tailscaleState = QStringLiteral("Running");
+        script->lateReadMs = 600;  // the read at the timeout answers late
+        MainWindow window(store, fakeFactories(script));
+        useFakeSystem(window);
+        QPushButton* keep = nullptr;
+        for (QPushButton* button : window.findChildren<QPushButton*>()) {
+            if (button->text() == QStringLiteral("Keep waiting 1:00")) keep = button;
+        }
+        QVERIFY(keep != nullptr);
+        std::optional<Outcome> outcome;
+        QObject::connect(&window, &MainWindow::runFinished, [&outcome](Outcome o) { outcome = o; });
+        window.startWakeAndConnect();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.timelineTexts().filter(QStringLiteral("Timed out after")).isEmpty(), 3000);
+        QVERIFY(!outcome.has_value());  // still reading Tailscale
+        QVERIFY(keep->isHidden());
+        const QString before = window.progressText();
+        window.keepWaiting();
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("Waiting one more minute")).isEmpty());
+        QCOMPARE(window.progressText(), before);
+        QTRY_VERIFY_WITH_TIMEOUT(outcome.has_value(), 5000);
+        QCOMPARE(*outcome, Outcome::TimedOut);
+        QCOMPARE(script->readersAsked, 2);
+    }
+
+    void checkNowAddsWhatTailscaleShows() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile tailnet = sampleProfile(QStringLiteral("Tailnet PC"), true, false);
+        tailnet.check.host = QStringLiteral("100.64.0.10");
+        QVERIFY(store.save({tailnet, sampleProfile(QStringLiteral("Local PC"), true, false)}, nullptr));
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+        script->tailscaleState = QStringLiteral("Running");
+        MainWindow window(store, fakeFactories(script));
+        int checks = 0;
+        QObject::connect(&window, &MainWindow::checkFinished, [&checks](bool) { ++checks; });
+        const QString line = QStringLiteral("Tailscale is connected; it shows living-room-pc online");
+
+        window.selectProfile(QStringLiteral("Tailnet PC"));
+        window.startCheckOnly();
+        QTRY_COMPARE_WITH_TIMEOUT(checks, 1, 3000);
+        QVERIFY(!window.isRunning());
+        QVERIFY2(window.timelineTexts().filter(line).size() == 1, qPrintable(window.timelineTexts().join(QLatin1Char('\n'))));
+        QCOMPARE(script->readersAsked, 1);
+
+        // Ready: nothing to add, no reader.
+        script->statuses = {ProbeStatus::Ready};
+        script->probesCreated = 0;
+        window.startCheckOnly();
+        QTRY_COMPARE_WITH_TIMEOUT(checks, 2, 3000);
+        QCOMPARE(script->readersAsked, 1);
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("Tailscale")).isEmpty());
+
+        // Another kind of host: never a reader.
+        script->statuses = {ProbeStatus::TimedOut};
+        script->probesCreated = 0;
+        window.selectProfile(QStringLiteral("Local PC"));
+        window.startCheckOnly();
+        QTRY_COMPARE_WITH_TIMEOUT(checks, 3, 3000);
+        QCOMPARE(script->readersAsked, 1);
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("Tailscale")).isEmpty());
+
+        // No answer from the tool: no line.
+        script->tailscaleState.clear();
+        script->probesCreated = 0;
+        window.selectProfile(QStringLiteral("Tailnet PC"));
+        window.startCheckOnly();
+        QTRY_COMPARE_WITH_TIMEOUT(checks, 4, 3000);
+        QCOMPARE(script->readersAsked, 2);
+        QVERIFY(window.timelineTexts().filter(QStringLiteral("Tailscale")).isEmpty());
+    }
+
+    void helpExplainsResendsNetworksTailscaleAndLearnedTime() {
+        const QString text = MainWindow::howWakingWorksText();
+        QVERIFY(text.contains(QStringLiteral("every %1 seconds by default").arg(WakeConfig::kDefaultResendSeconds)));
+        QVERIFY(text.contains(QStringLiteral("Every local network this Mac is on")));
+        QVERIFY(text.contains(QStringLiteral("Tailscale's own status command on this Mac")));
+        QVERIFY(text.contains(QStringLiteral("nothing is stored or sent anywhere")));
+        QVERIFY(text.contains(QStringLiteral("Learned time")));
+        QVERIFY(!text.contains(QStringLiteral("so it is awake and connected")));
+    }
 
     void aSecondRunShowsTheLearnedTime() {
         QTemporaryDir dir;
