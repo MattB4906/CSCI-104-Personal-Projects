@@ -1320,8 +1320,10 @@ private slots:
             QString expected;
         };
         const std::vector<Case> cases = {
-            {tailscaleWithPc(true), QStringLiteral("Tailscale shows the computer online, so it is awake and connected; "
-                                                   "the service on port 47989 did not answer: check that it is running.")},
+            {tailscaleWithPc(true), QStringLiteral("Tailscale shows the computer online. If that is current (Tailscale can "
+                                                   "take a while to notice that a computer went to sleep), the computer is "
+                                                   "awake and the service on port 47989 is what did not answer: check that "
+                                                   "it is running.")},
             {tailscaleWithPc(false), QStringLiteral("Tailscale still shows the computer offline, so it most likely did not "
                                                     "wake up, or woke up without Tailscale.")},
             {tailscaleState(QStringLiteral("Stopped")), QStringLiteral("Tailscale is no longer connected on this Mac")},

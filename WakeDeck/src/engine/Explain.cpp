@@ -65,8 +65,9 @@ QString explainTimeout(const Observations& o) {
     // What Tailscale itself showed at the end, attributed to it.
     switch (o.tailscale) {
     case TailscaleAtTimeout::DeviceOnline:
-        lines << QStringLiteral("- Tailscale shows the computer online, so it is awake and connected; the service on "
-                                "port %1 did not answer: check that it is running.")
+        lines << QStringLiteral("- Tailscale shows the computer online. If that is current (Tailscale can take a while "
+                                "to notice that a computer went to sleep), the computer is awake and the service on "
+                                "port %1 is what did not answer: check that it is running.")
                      .arg(port);
         break;
     case TailscaleAtTimeout::DeviceOffline:
