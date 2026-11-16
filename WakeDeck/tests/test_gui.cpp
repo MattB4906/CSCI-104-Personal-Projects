@@ -32,13 +32,18 @@
 #include "app/MainWindow.h"
 #include "app/ProfileEditorDialog.h"
 #include "app/SystemServices.h"
+#include "app/UrlCommand.h"
 #include "app/WaitProgress.h"
+#include "engine/BatchChecker.h"
 #include "engine/ClientLauncher.h"
+#include "engine/Moonlight.h"
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
 #include "engine/Session.h"
 #include "engine/Tailscale.h"
 #include "engine/TimingHistory.h"
+
+#include <QFileOpenEvent>
 
 using namespace wakedeck;
 using wakedeck::app::MainWindow;
@@ -121,6 +126,21 @@ public:
 private:
     TailscaleStatus status_;
     int delayMs_;
+};
+
+class FakeDockMenu final : public app::DockMenu {
+public:
+    explicit FakeDockMenu(QObject* parent = nullptr) : app::DockMenu(parent) {}
+    void setState(const QStringList& profileNames, bool running, const QString& runningProfile, bool cancellable) override {
+        calls.push_back({profileNames, running, runningProfile, cancellable});
+    }
+    struct Call {
+        QStringList profileNames;
+        bool running = false;
+        QString runningProfile;
+        bool cancellable = false;
+    };
+    std::vector<Call> calls;
 };
 
 MainWindow::FactoriesFor fakeFactories(const std::shared_ptr<Script>& script) {
@@ -1383,16 +1403,17 @@ private slots:
         QFile file(report);
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-        QCOMPARE(lines.size(), 8);
+        QCOMPARE(lines.size(), 9);
         QVERIFY(lines[0].startsWith(QStringLiteral("version=")));
         QCOMPARE(lines[1], QStringLiteral("platform=offscreen"));
         QCOMPARE(lines[2], QStringLiteral("bundleId=none"));
         QCOMPARE(lines[3], QStringLiteral("notifications=unavailable"));
         QCOMPARE(lines[4], QStringLiteral("dockTile=unavailable"));
+        QCOMPARE(lines[5], QStringLiteral("urlScheme=none"));
         // Tailscale: the suite points the tool at a missing path, so it is never run.
-        QCOMPARE(lines[5], QStringLiteral("tailscaleCli=not found"));
-        QVERIFY2(lines[6].startsWith(QStringLiteral("tailscaleState=error: ")), qPrintable(lines[6]));
-        QCOMPARE(lines[7], QStringLiteral("tailscalePeers=0"));
+        QCOMPARE(lines[6], QStringLiteral("tailscaleCli=not found"));
+        QVERIFY2(lines[7].startsWith(QStringLiteral("tailscaleState=error: ")), qPrintable(lines[7]));
+        QCOMPARE(lines[8], QStringLiteral("tailscalePeers=0"));
         QFile picture(report + QStringLiteral(".dock.png"));
         QVERIFY(picture.open(QIODevice::ReadOnly));
         QCOMPARE(picture.read(8), QByteArray("\x89PNG\r\n\x1a\n", 8));
@@ -1785,12 +1806,323 @@ private slots:
         QCOMPARE(collected->client.appName, QStringLiteral("Desktop"));
         QCOMPARE(collected->client.launchMode, QStringLiteral("stream"));
     }
+
+    // ---- F1: URL Scheme & Dock Menu ----
+
+    void urlCommandParsing() {
+        using app::UrlAction;
+        using app::parseWakeDeckUrl;
+
+        QString error;
+        const auto c1 = parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://connect/Living%20Room%20PC")), &error);
+        QVERIFY2(c1.has_value(), qPrintable(error));
+        QCOMPARE(c1->action, UrlAction::Connect);
+        QCOMPARE(c1->profileName, QStringLiteral("Living Room PC"));
+
+        const auto c2 = parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://check/Living%20Room%20PC")), &error);
+        QVERIFY2(c2.has_value(), qPrintable(error));
+        QCOMPARE(c2->action, UrlAction::Check);
+
+        const auto c3 = parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://wake/Living%20Room%20PC")), &error);
+        QVERIFY2(c3.has_value(), qPrintable(error));
+        QCOMPARE(c3->action, UrlAction::Wake);
+
+        const auto c4 = parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://open/Living%20Room%20PC")), &error);
+        QVERIFY2(c4.has_value(), qPrintable(error));
+        QCOMPARE(c4->action, UrlAction::Open);
+
+        // Query fallback:
+        const auto cQuery = parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://connect?profile=My%20PC")), &error);
+        QVERIFY2(cQuery.has_value(), qPrintable(error));
+        QCOMPARE(cQuery->profileName, QStringLiteral("My PC"));
+
+        // Case insensitivity:
+        const auto cCase = parseWakeDeckUrl(QUrl(QStringLiteral("WAKEDECK://CONNECT/Living%20Room%20PC/")), &error);
+        QVERIFY2(cCase.has_value(), qPrintable(error));
+        QCOMPARE(cCase->action, UrlAction::Connect);
+        QCOMPARE(cCase->profileName, QStringLiteral("Living Room PC"));
+
+        // Invalid scheme:
+        QVERIFY(!parseWakeDeckUrl(QUrl(QStringLiteral("https://connect/My%20PC")), &error).has_value());
+        QVERIFY(error.contains(QStringLiteral("scheme")));
+
+        // Invalid action:
+        QVERIFY(!parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://destroy/My%20PC")), &error).has_value());
+        QVERIFY(error.contains(QStringLiteral("destroy")));
+
+        // Extra path segments:
+        QVERIFY(!parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://connect/a/b")), &error).has_value());
+        QVERIFY(error.contains(QStringLiteral("Extra path")));
+
+        // Missing profile:
+        QVERIFY(!parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://connect/")), &error).has_value());
+        QVERIFY(!parseWakeDeckUrl(QUrl(QStringLiteral("wakedeck://connect?profile=")), &error).has_value());
+    }
+
+    void urlCommandWindowExecution() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+
+        Profile pFull = sampleProfile(QStringLiteral("Full PC"), true, true);
+        Profile pNoWake = sampleProfile(QStringLiteral("NoWake PC"), false, true);
+        pNoWake.wake = std::nullopt;
+        Profile pNoClient = sampleProfile(QStringLiteral("NoClient PC"), true, false);
+        pNoClient.client.preset = ClientConfig::Preset::None;
+
+        QVERIFY(store.save({pFull, pNoWake, pNoClient}, nullptr));
+
+        auto script = std::make_shared<Script>();
+        MainWindow window(store, fakeFactories(script));
+
+        QString error;
+        // Connect
+        QVERIFY(window.openUrl(QUrl(QStringLiteral("wakedeck://connect/Full%20PC")), &error));
+        QCOMPARE(window.currentProfile()->name, QStringLiteral("Full PC"));
+        QVERIFY(window.isRunning());
+
+        // Busy refusal
+        QVERIFY(!window.openUrl(QUrl(QStringLiteral("wakedeck://check/Full%20PC")), &error));
+        QVERIFY(error.contains(QStringLiteral("in progress")));
+
+        window.cancelRun();
+        // Wait until run finishes cancel
+        QTRY_VERIFY(!window.isRunning());
+
+        // Check
+        QVERIFY(window.openUrl(QUrl(QStringLiteral("wakedeck://check/Full%20PC")), &error));
+        QTRY_VERIFY(!window.isRunning());
+
+        // Wake on profile with wake switched off
+        QVERIFY(!window.openUrl(QUrl(QStringLiteral("wakedeck://wake/NoWake%20PC")), &error));
+        QVERIFY(error.contains(QStringLiteral("switched off")));
+
+        // Open on profile with no client configured
+        QVERIFY(!window.openUrl(QUrl(QStringLiteral("wakedeck://open/NoClient%20PC")), &error));
+        QVERIFY(error.contains(QStringLiteral("no client")));
+
+        // Missing profile
+        QVERIFY(!window.openUrl(QUrl(QStringLiteral("wakedeck://connect/NoSuchPC")), &error));
+        QVERIFY(error.contains(QStringLiteral("not found")));
+    }
+
+    void dockMenuTracksStateAndSignals() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        QVERIFY(store.save({sampleProfile(QStringLiteral("Living Room PC"), true, true)}, nullptr));
+
+        auto script = std::make_shared<Script>();
+        script->probeDelayMs = 100;
+        MainWindow window(store, fakeFactories(script));
+
+        auto fakeDock = std::make_unique<FakeDockMenu>();
+        FakeDockMenu* dockPtr = fakeDock.get();
+        window.setDockMenu(std::move(fakeDock));
+
+        // When idle with profiles
+        QVERIFY(!dockPtr->calls.empty());
+        QCOMPARE(dockPtr->calls.back().profileNames.size(), 1);
+        QCOMPARE(dockPtr->calls.back().profileNames.first(), QStringLiteral("Living Room PC"));
+        QVERIFY(!dockPtr->calls.back().running);
+
+        // Start run via dock menu signal
+        emit dockPtr->connectRequested(QStringLiteral("Living Room PC"));
+        QVERIFY(window.isRunning());
+        QVERIFY(dockPtr->calls.back().running);
+        QCOMPARE(dockPtr->calls.back().runningProfile, QStringLiteral("Living Room PC"));
+        QVERIFY(dockPtr->calls.back().cancellable);
+
+        // Cancel via dock menu signal
+        emit dockPtr->cancelRequested();
+        QTRY_VERIFY(!window.isRunning());
+        QVERIFY(!dockPtr->calls.back().running);
+    }
+
+    // ---- F2: Duplicate & Reorder Computers ----
+
+    void updateProfilePreservesListOrder() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile pa = sampleProfile(QStringLiteral("Alpha"), false, false);
+        Profile pb = sampleProfile(QStringLiteral("Beta"), false, false);
+        Profile pc = sampleProfile(QStringLiteral("Gamma"), false, false);
+        QVERIFY(store.save({pa, pb, pc}, nullptr));
+
+        MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+        QCOMPARE(window.profiles().size(), std::size_t(3));
+
+        // Rename Beta to Beta2: should remain at index 1
+        Profile pb2 = pb;
+        pb2.name = QStringLiteral("Beta2");
+        QString error;
+        QVERIFY(window.updateProfile(QStringLiteral("Beta"), pb2, &error));
+        QCOMPARE(window.profiles().size(), std::size_t(3));
+        QCOMPARE(window.profiles()[0].name, QStringLiteral("Alpha"));
+        QCOMPARE(window.profiles()[1].name, QStringLiteral("Beta2"));
+        QCOMPARE(window.profiles()[2].name, QStringLiteral("Gamma"));
+        QCOMPARE(window.profileNameAt(1), QStringLiteral("Beta2"));
+
+        // Rename Beta2 onto Gamma: Gamma replaced, Beta2 remains at slot 1
+        Profile pGamma = pb2;
+        pGamma.name = QStringLiteral("Gamma");
+        QVERIFY(window.updateProfile(QStringLiteral("Beta2"), pGamma, &error));
+        QCOMPARE(window.profiles().size(), std::size_t(2));
+        QCOMPARE(window.profiles()[0].name, QStringLiteral("Alpha"));
+        QCOMPARE(window.profiles()[1].name, QStringLiteral("Gamma"));
+    }
+
+    void duplicateProfileAndMoveActions() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile pa = sampleProfile(QStringLiteral("A"), false, false);
+        Profile pb = sampleProfile(QStringLiteral("B"), false, false);
+        QVERIFY(store.save({pa, pb}, nullptr));
+
+        MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+
+        // Duplicate A -> adds "A Copy"
+        QString error;
+        QVERIFY(window.duplicateProfile(QStringLiteral("A"), QString(), &error));
+        QCOMPARE(window.profiles().size(), std::size_t(3));
+        QCOMPARE(window.profiles()[2].name, QStringLiteral("A Copy"));
+
+        // Move B (at row 1) Up by delta -1 -> order becomes B, A, A Copy
+        window.selectProfile(QStringLiteral("B"));
+        QVERIFY(window.moveCurrentProfile(-1, &error));
+        QCOMPARE(window.profiles()[0].name, QStringLiteral("B"));
+        QCOMPARE(window.profiles()[1].name, QStringLiteral("A"));
+        QCOMPARE(window.profiles()[2].name, QStringLiteral("A Copy"));
+
+        // Move B Down by delta +1 -> order becomes A, B, A Copy
+        QVERIFY(window.moveCurrentProfile(1, &error));
+        QCOMPARE(window.profiles()[0].name, QStringLiteral("A"));
+        QCOMPARE(window.profiles()[1].name, QStringLiteral("B"));
+        QCOMPARE(window.profiles()[2].name, QStringLiteral("A Copy"));
+    }
+
+    void refusedStoreSafetyInGui() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("profiles.json"));
+        // Create schema version 99 file to force refusal
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("{\"schemaVersion\": 99, \"profiles\": []}");
+        file.close();
+
+        MainWindow window(ProfileStore(path), fakeFactories(std::make_shared<Script>()));
+        QVERIFY(!window.storeRefusal().isEmpty());
+
+        QString error;
+        QVERIFY(!window.duplicateProfile(QStringLiteral("A"), QString(), &error));
+        QVERIFY(!window.moveCurrentProfile(1, &error));
+        QCOMPARE(window.importMoonlightHosts({}, false, &error), -1);
+    }
+
+    // ---- F3: Tailscale Peer Picker & Moonlight Importer ----
+
+    void tailscalePeerPickerInEditor() {
+        Profile p = sampleProfile(QStringLiteral("Test"), false, false);
+        ProfileEditorDialog dialog(p, false);
+
+        TailscalePeer peer;
+        peer.hostName = QStringLiteral("living-room-pc");
+        peer.dnsName = QStringLiteral("living-room-pc.example-tailnet.ts.net.");
+        peer.addresses = {QStringLiteral("100.64.0.10")};
+        peer.online = true;
+
+        dialog.applyTailscalePeer(peer);
+        auto* hostEdit = dialog.findChild<QLineEdit*>(QStringLiteral("hostEdit"));
+        QVERIFY(hostEdit != nullptr);
+        QCOMPARE(hostEdit->text(), QStringLiteral("living-room-pc.example-tailnet.ts.net"));
+
+        // Tailscale reader factory injection
+        TailscaleStatus status;
+        status.available = true;
+        status.backendState = QStringLiteral("Stopped");
+        dialog.setTailscaleReaderFactory([status](QObject* parent) -> TailscaleReader* {
+            return new FakeTailscaleReader(status, parent);
+        });
+
+        auto* btn = dialog.findChild<QPushButton*>(QStringLiteral("chooseTailscaleButton"));
+        QVERIFY(btn != nullptr);
+        btn->click();
+    }
+
+    void moonlightImportInWindow() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile existing = sampleProfile(QStringLiteral("Gaming PC"), false, false);
+        existing.check.host = QStringLiteral("192.168.1.10");
+        QVERIFY(store.save({existing}, nullptr));
+
+        MainWindow window(store, fakeFactories(std::make_shared<Script>()));
+
+        MoonlightHost h1;
+        h1.name = QStringLiteral("Gaming PC");
+        h1.localAddress = QStringLiteral("192.168.1.99");
+
+        MoonlightHost h2;
+        h2.name = QStringLiteral("Office PC");
+        h2.localAddress = QStringLiteral("192.168.1.100");
+
+        // Without replace: Gaming PC skipped, Office PC added
+        QString error;
+        int imported = window.importMoonlightHosts({h1, h2}, false, &error);
+        QCOMPARE(imported, 1);
+        QCOMPARE(window.profiles().size(), std::size_t(2));
+        QCOMPARE(window.profiles()[0].check.host, QStringLiteral("192.168.1.10"));
+        QCOMPARE(window.profiles()[1].name, QStringLiteral("Office PC"));
+
+        // With replace: Gaming PC replaced
+        imported = window.importMoonlightHosts({h1}, true, &error);
+        QCOMPARE(imported, 1);
+        QCOMPARE(window.profiles()[0].check.host, QStringLiteral("192.168.1.99"));
+    }
+
+    // ---- F4: Check All Computers ----
+
+    void checkAllComputersInWindow() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile p1 = sampleProfile(QStringLiteral("PC1"), false, false);
+        Profile p2 = sampleProfile(QStringLiteral("PC2"), false, false);
+        QVERIFY(store.save({p1, p2}, nullptr));
+
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Ready, ProbeStatus::Refused};
+
+        MainWindow window(store, fakeFactories(script));
+
+        int readyCount = -1;
+        int totalCount = -1;
+        bool finished = false;
+        QObject::connect(&window, &MainWindow::checkAllFinished, [&](int r, int t) {
+            readyCount = r;
+            totalCount = t;
+            finished = true;
+        });
+
+        window.startCheckAll();
+        QTRY_VERIFY(finished);
+
+        QCOMPARE(readyCount, 1);
+        QCOMPARE(totalCount, 2);
+        QCOMPARE(window.profileCheckBadge(QStringLiteral("PC1")), QStringLiteral("ready"));
+        QCOMPARE(window.profileCheckBadge(QStringLiteral("PC2")), QStringLiteral("not ready"));
+        QCOMPARE(window.serviceStatusText(), QStringLiteral("checked all: 1 of 2 ready"));
+
+        // Verify selectProfile still works with badges on list items
+        window.selectProfile(QStringLiteral("pc2"));
+        QCOMPARE(window.currentProfile()->name, QStringLiteral("PC2"));
+        window.selectProfile(QStringLiteral("pc1"));
+        QCOMPARE(window.currentProfile()->name, QStringLiteral("PC1"));
+    }
 };
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
     // No test may run the real Tailscale tool: a missing path switches it off.
     qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale"));
+    qputenv("WAKEDECK_MOONLIGHT_PLIST", QByteArrayLiteral("/nonexistent/wakedeck-test-moonlight.plist"));
     // Settings go to an INI file in a temporary folder under a test name, so the
     // window never reads or writes the user's own WakeDeck preferences.
     QTemporaryDir settingsDir;

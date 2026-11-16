@@ -63,6 +63,11 @@ class ProfilesTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase() {
+        qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale"));
+        qputenv("WAKEDECK_MOONLIGHT_PLIST", QByteArrayLiteral("/nonexistent/wakedeck-test-moonlight.plist"));
+    }
+
     // ---- JSON form ----
 
     void roundTripKeepsEveryField() {
@@ -738,6 +743,67 @@ private slots:
         const QString absent = dir.filePath(QStringLiteral("work.history.json"));
         QVERIFY(TimingHistory(absent).remove(QStringLiteral("PC")));
         QVERIFY(!QFile::exists(absent));
+    }
+
+    void suggestedDuplicateNameGeneratesUniqueNames() {
+        std::vector<Profile> list;
+        Profile p1; p1.name = QStringLiteral("Living Room PC");
+        list.push_back(p1);
+
+        QCOMPARE(suggestedDuplicateName(list, QStringLiteral("Living Room PC")), QStringLiteral("Living Room PC Copy"));
+
+        Profile p2; p2.name = QStringLiteral("Living Room PC Copy");
+        list.push_back(p2);
+        QCOMPARE(suggestedDuplicateName(list, QStringLiteral("Living Room PC")), QStringLiteral("Living Room PC Copy 2"));
+        QCOMPARE(suggestedDuplicateName(list, QStringLiteral("Living Room PC Copy")), QStringLiteral("Living Room PC Copy 2"));
+
+        Profile p3; p3.name = QStringLiteral("Living Room PC Copy 2");
+        list.push_back(p3);
+        QCOMPARE(suggestedDuplicateName(list, QStringLiteral("Living Room PC")), QStringLiteral("Living Room PC Copy 3"));
+        QCOMPARE(suggestedDuplicateName(list, QStringLiteral("Living Room PC Copy 2")), QStringLiteral("Living Room PC Copy 3"));
+
+        // Case insensitivity:
+        Profile pOther; pOther.name = QStringLiteral("office pc copy");
+        list.push_back(pOther);
+        QCOMPARE(suggestedDuplicateName(list, QStringLiteral("Office PC")), QStringLiteral("Office PC Copy 2"));
+    }
+
+    void moveProfileReordersCorrectly() {
+        std::vector<Profile> list;
+        Profile pa; pa.name = QStringLiteral("A");
+        Profile pb; pb.name = QStringLiteral("B");
+        Profile pc; pc.name = QStringLiteral("C");
+        Profile pd; pd.name = QStringLiteral("D");
+        list = {pa, pb, pc, pd};
+
+        // Move non-existent returns false
+        QVERIFY(!moveProfile(list, QStringLiteral("Z"), 0));
+
+        // Move C to 0 -> C, A, B, D
+        QVERIFY(moveProfile(list, QStringLiteral("C"), 0));
+        QCOMPARE(list.size(), std::size_t(4));
+        QCOMPARE(list[0].name, QStringLiteral("C"));
+        QCOMPARE(list[1].name, QStringLiteral("A"));
+        QCOMPARE(list[2].name, QStringLiteral("B"));
+        QCOMPARE(list[3].name, QStringLiteral("D"));
+
+        // Move C back to 2 -> A, B, C, D
+        QVERIFY(moveProfile(list, QStringLiteral("C"), 2));
+        QCOMPARE(list[0].name, QStringLiteral("A"));
+        QCOMPARE(list[1].name, QStringLiteral("B"));
+        QCOMPARE(list[2].name, QStringLiteral("C"));
+        QCOMPARE(list[3].name, QStringLiteral("D"));
+
+        // Move to its own index returns true
+        QVERIFY(moveProfile(list, QStringLiteral("B"), 1));
+        QCOMPARE(list[1].name, QStringLiteral("B"));
+
+        // Move A to bottom (clamped to 3) -> B, C, D, A
+        QVERIFY(moveProfile(list, QStringLiteral("a"), 999));
+        QCOMPARE(list[0].name, QStringLiteral("B"));
+        QCOMPARE(list[1].name, QStringLiteral("C"));
+        QCOMPARE(list[2].name, QStringLiteral("D"));
+        QCOMPARE(list[3].name, QStringLiteral("A"));
     }
 };
 

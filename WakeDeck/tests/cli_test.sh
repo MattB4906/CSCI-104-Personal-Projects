@@ -11,6 +11,8 @@ CLI=${1:?usage: cli_test.sh <path to wakedeck-cli>}
 # Tailscale cases below point it at a fake script instead.
 WAKEDECK_TAILSCALE_CLI=/nonexistent/wakedeck-test-tailscale
 export WAKEDECK_TAILSCALE_CLI
+WAKEDECK_MOONLIGHT_PLIST=/nonexistent/wakedeck-test-moonlight.plist
+export WAKEDECK_MOONLIGHT_PLIST
 MAC=00:00:5E:00:53:2A
 TO=192.168.1.255
 total=0
@@ -68,6 +70,12 @@ expect 1 "check without host" -- check
 expect 1 "check with bad port" -- check --host 192.0.2.10 --port 0
 expect 1 "check with bad kind" -- check --host 192.0.2.10 --kind bogus
 expect 1 "check with unknown option" -- check --host 192.0.2.10 --bogus
+expect 1 "check with --host and --profile" -- check --host 192.0.2.10 --profile "Test PC"
+expect 1 "check with --profile and --all" -- check --profile "Test PC" --all
+expect 1 "check with --host and --all" -- check --host 192.0.2.10 --all
+expect 1 "check with --profile and --port" -- check --profile "Test PC" --port 47989
+expect 1 "check with --all and --port" -- check --all --port 47989
+expect 1 "check with --profile and --kind" -- check --profile "Test PC" --kind tcp
 expect 1 "connect without check host" -- connect
 expect 1 "connect with --mac but no --to" -- connect --check-host 192.0.2.10 --mac "$MAC"
 expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 --ports 9
@@ -100,8 +108,13 @@ contains "resend error names the range" "--resend-s must be 0 (send once) or a w
 contains "connect help names --resend-s" "--resend-s" -- connect --help
 contains "connect help names --local-networks" "--local-networks" -- connect --help
 contains "profile help names --resend-s" "--resend-s" -- profile --help
+contains "profile help names duplicate" "duplicate" -- profile --help
+contains "profile help names move" "move" -- profile --help
+contains "profile help names import-moonlight" "import-moonlight" -- profile --help
+contains "check help names --profile" "--profile" -- check --help
+contains "check help names --all" "--all" -- check --help
 
-contains "version string" "wakedeck-cli 1.2.0" -- --version
+contains "version string" "wakedeck-cli 1.3.0" -- --version
 contains "help lists check" "check" -- --help
 contains "help lists connect" "connect" -- --help
 contains "help lists profile" "profile" -- --help
@@ -225,6 +238,54 @@ printf 'this is not json' > "$STORE"
 contains "corrupt store warns" "It was moved" -- profile list --store "$STORE"
 rm -rf "$STOREDIR"
 
+# Duplicate and move (1.3)
+F2DIR=$(mktemp -d)
+F2STORE="$F2DIR/profiles.json"
+expect 1 "profile duplicate without profile" -- profile duplicate --store "$F2STORE"
+expect 2 "profile duplicate unknown profile" -- profile duplicate "Nope" --store "$F2STORE"
+expect 1 "profile move without profile" -- profile move --store "$F2STORE"
+expect 1 "profile move without --to" -- profile move "Test PC" --store "$F2STORE"
+expect 1 "profile move bad --to" -- profile move "Test PC" --to bogus --store "$F2STORE"
+expect 2 "profile move unknown profile" -- profile move "Nope" --to top --store "$F2STORE"
+
+expect 0 "profile add for duplicate test" -- profile add --store "$F2STORE" --name "Alpha" --check-host 127.0.0.1
+expect 0 "profile add second" -- profile add --store "$F2STORE" --name "Beta" --check-host 127.0.0.1
+expect 0 "profile duplicate auto-name" -- profile duplicate "Alpha" --store "$F2STORE"
+contains "auto duplicate created Alpha Copy" "Alpha Copy" -- profile list --store "$F2STORE"
+expect 0 "profile duplicate auto-name again" -- profile duplicate "Alpha" --store "$F2STORE"
+contains "second auto duplicate created Alpha Copy 2" "Alpha Copy 2" -- profile list --store "$F2STORE"
+expect 0 "profile duplicate explicit name" -- profile duplicate "Alpha" "Gamma" --store "$F2STORE"
+contains "explicit duplicate created Gamma" "Gamma" -- profile list --store "$F2STORE"
+expect 2 "profile duplicate existing without replace" -- profile duplicate "Alpha" "Beta" --store "$F2STORE"
+expect 0 "profile duplicate existing with replace" -- profile duplicate "Alpha" "Beta" --replace --store "$F2STORE"
+
+# Move testing
+expect 0 "profile move Alpha to bottom" -- profile move "Alpha" --to bottom --store "$F2STORE"
+expect 0 "profile move Alpha to top" -- profile move "Alpha" --to top --store "$F2STORE"
+expect 0 "profile move Alpha to 3" -- profile move "Alpha" --to 3 --store "$F2STORE"
+
+# Import Moonlight (1.3)
+expect 1 "import-moonlight unknown option" -- profile import-moonlight --bogus --store "$F2STORE"
+expect 2 "import-moonlight nonexistent file" -- profile import-moonlight --from "/nonexistent/moonlight.ini" --store "$F2STORE"
+MLFILE="$F2DIR/moonlight.ini"
+cat > "$MLFILE" <<'EOF'
+[hosts]
+1\hostname=Living Room Rig
+1\mac=00:00:5E:00:53:2A
+1\manualaddress=192.0.2.10
+1\manualport=47989
+1\apps\1\name=Desktop
+1\apps\1\hidden=false
+size=1
+EOF
+contains "import-moonlight dry run" "Discovered 1 computer(s)" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE" --dry-run
+contains "import-moonlight dry run names host" "Living Room Rig" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE" --dry-run
+expect 0 "import-moonlight imports computer" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE"
+contains "store has imported computer" "Living Room Rig" -- profile list --store "$F2STORE"
+contains "import-moonlight skip existing" "Skipped existing profile \"Living Room Rig\"" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE"
+contains "import-moonlight replace" "Imported 1 computer" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE" --replace
+rm -rf "$F2DIR"
+
 # A version 1 store: read as it is, kept once as profiles.v1-backup.json when first replaced.
 V1DIR=$(mktemp -d)
 V1STORE="$V1DIR/profiles.json"
@@ -296,6 +357,31 @@ while time.time() < end:
         connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp --client custom --client-path /usr/bin/true --client-args "{host}"
     expect 4 "connect fails with exit 4 when the client is missing" -- \
         connect --check-host 127.0.0.1 --check-port "$OPEN" --check tcp --client custom --client-path /nonexistent/wakedeck-client
+
+    # check --profile and check --all (1.3)
+    CHDIR=$(mktemp -d)
+    CHSTORE="$CHDIR/profiles.json"
+    expect 2 "check --all on empty store" -- check --all --store "$CHSTORE"
+    expect 2 "check --profile unknown" -- check --profile "Nope" --store "$CHSTORE"
+    expect 0 "profile add closed for check" -- profile add --store "$CHSTORE" --name "Closed PC" \
+        --check-host 127.0.0.1 --check-port "$CLOSED" --check tcp
+    expect 2 "check --profile against closed port" -- check --profile "Closed PC" --store "$CHSTORE"
+    contains "check --profile closed explains" "Not ready: refused" -- check --profile "Closed PC" --store "$CHSTORE"
+    expect 2 "check --all with one closed port exits 2" -- check --all --store "$CHSTORE"
+    contains "check --all summary 0 of 1" "Summary: 0 of 1 ready" -- check --all --store "$CHSTORE"
+
+    expect 0 "profile add open for check" -- profile add --store "$CHSTORE" --name "Open PC" \
+        --check-host 127.0.0.1 --check-port "$OPEN" --check tcp
+    expect 0 "check --profile against open port" -- check --profile "Open PC" --store "$CHSTORE"
+    contains "check --profile open reports ready" "accepted the connection" -- check --profile "Open PC" --store "$CHSTORE"
+    expect 2 "check --all with one open and one closed exits 2" -- check --all --store "$CHSTORE"
+    contains "check --all summary 1 of 2" "Summary: 1 of 2 ready" -- check --all --store "$CHSTORE"
+
+    expect 0 "profile remove closed" -- profile remove "Closed PC" --store "$CHSTORE"
+    expect 0 "check --all with all open exits 0" -- check --all --store "$CHSTORE"
+    contains "check --all summary 1 of 1" "Summary: 1 of 1 ready" -- check --all --store "$CHSTORE"
+    rm -rf "$CHDIR"
+
     kill "$LISTENER" 2>/dev/null
     wait "$LISTENER" 2>/dev/null
     rm -f "$PORTFILE"

@@ -21,8 +21,11 @@
 #include <optional>
 #include <vector>
 
+#include "engine/BatchChecker.h"
 #include "engine/Explain.h"
 #include "engine/LocalNetworks.h"
+#include "engine/Moonlight.h"
+#include "engine/Profile.h"
 #include "engine/QtWaker.h"
 #include "engine/ServiceProbe.h"
 #include "engine/Session.h"
@@ -67,13 +70,15 @@ private:
 
 class FakeProbe final : public Probe {
 public:
-    FakeProbe(ProbeResult result, QObject* parent) : Probe(parent), result_(std::move(result)) {}
+    FakeProbe(ProbeResult result, QObject* parent) : Probe(parent), result_(std::move(result)), delayMs_(0) {}
+    FakeProbe(ProbeResult result, int delayMs, QObject* parent) : Probe(parent), result_(std::move(result)), delayMs_(delayMs) {}
     void start() override {
-        QTimer::singleShot(0, this, [this] { emit finished(result_); });
+        QTimer::singleShot(delayMs_, this, [this] { emit finished(result_); });
     }
 
 private:
     ProbeResult result_;
+    int delayMs_ = 0;
 };
 
 class FakeWaker final : public Waker {
@@ -348,6 +353,7 @@ private slots:
     void initTestCase() {
         // No test may run the real Tailscale tool: a missing path switches it off.
         qputenv("WAKEDECK_TAILSCALE_CLI", QByteArrayLiteral("/nonexistent/wakedeck-test-tailscale"));
+        qputenv("WAKEDECK_MOONLIGHT_PLIST", QByteArrayLiteral("/nonexistent/wakedeck-test-moonlight.plist"));
     }
 
     // ---- Sunshine reply parsing (pure) ----
@@ -1500,6 +1506,270 @@ private slots:
         QVERIFY(late.outcome.has_value());
         QCOMPARE(*late.outcome, Outcome::TimedOut);
         QVERIFY(!timedOut.wakeToReadyMs().has_value());
+    }
+
+    void preferredTailscaleHostFormats() {
+        TailscalePeer peer1;
+        peer1.dnsName = QStringLiteral("living-room-pc.example-tailnet.ts.net.");
+        peer1.addresses = {QStringLiteral("100.64.0.10")};
+        peer1.hostName = QStringLiteral("living-room-pc");
+        QCOMPARE(preferredTailscaleHost(peer1), QStringLiteral("living-room-pc.example-tailnet.ts.net"));
+
+        TailscalePeer peer2;
+        peer2.dnsName.clear();
+        peer2.addresses = {QStringLiteral("fd7a:115c:a1e0::1"), QStringLiteral("100.64.0.10")};
+        peer2.hostName = QStringLiteral("living-room-pc");
+        QCOMPARE(preferredTailscaleHost(peer2), QStringLiteral("100.64.0.10"));
+
+        TailscalePeer peer3;
+        peer3.dnsName.clear();
+        peer3.addresses = {QStringLiteral("fd7a:115c:a1e0::1")};
+        peer3.hostName = QStringLiteral("living-room-pc");
+        QCOMPARE(preferredTailscaleHost(peer3), QStringLiteral("fd7a:115c:a1e0::1"));
+
+        TailscalePeer peer4;
+        peer4.dnsName.clear();
+        peer4.addresses.clear();
+        peer4.hostName = QStringLiteral(" living-room-pc ");
+        QCOMPARE(preferredTailscaleHost(peer4), QStringLiteral("living-room-pc"));
+    }
+
+    void moonlightSettingsMacFormats() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("moonlight.ini"));
+        QSettings settings(path, QSettings::IniFormat);
+        settings.beginWriteArray(QStringLiteral("hosts"));
+
+        // Host 0: 6-byte binary MAC
+        settings.setArrayIndex(0);
+        settings.setValue(QStringLiteral("hostname"), QStringLiteral("PC-BinMac"));
+        settings.setValue(QStringLiteral("localaddress"), QStringLiteral("192.168.1.50"));
+        const QByteArray rawMac("\x00\x00\x5E\x00\x53\x2A", 6);
+        settings.setValue(QStringLiteral("mac"), rawMac);
+
+        // Host 1: All-zero binary MAC
+        settings.setArrayIndex(1);
+        settings.setValue(QStringLiteral("hostname"), QStringLiteral("PC-ZeroMac"));
+        settings.setValue(QStringLiteral("localaddress"), QStringLiteral("192.168.1.51"));
+        const QByteArray zeroMac("\x00\x00\x00\x00\x00\x00", 6);
+        settings.setValue(QStringLiteral("mac"), zeroMac);
+
+        // Host 2: String MAC
+        settings.setArrayIndex(2);
+        settings.setValue(QStringLiteral("hostname"), QStringLiteral("PC-StrMac"));
+        settings.setValue(QStringLiteral("localaddress"), QStringLiteral("192.168.1.52"));
+        settings.setValue(QStringLiteral("mac"), QStringLiteral("00:00:5E:00:53:2A"));
+
+        // Host 3: All-zero string MAC
+        settings.setArrayIndex(3);
+        settings.setValue(QStringLiteral("hostname"), QStringLiteral("PC-ZeroStrMac"));
+        settings.setValue(QStringLiteral("localaddress"), QStringLiteral("192.168.1.53"));
+        settings.setValue(QStringLiteral("mac"), QStringLiteral("00:00:00:00:00:00"));
+
+        settings.endArray();
+        settings.sync();
+
+        const auto result = readMoonlightSettings(settings, path);
+        QVERIFY(result.ok);
+        QCOMPARE(result.hosts.size(), std::size_t(4));
+
+        // Host 0
+        QCOMPARE(result.hosts[0].name, QStringLiteral("PC-BinMac"));
+        QVERIFY(result.hosts[0].mac.has_value());
+        QCOMPARE(QString::fromStdString(result.hosts[0].mac->toString()), QStringLiteral("00:00:5E:00:53:2A"));
+        Profile p0 = result.hosts[0].toProfile();
+        QVERIFY(p0.wake.has_value());
+        QCOMPARE(p0.wake->destinationMode, WakeDestination::LocalNetworks);
+
+        // Host 1
+        QCOMPARE(result.hosts[1].name, QStringLiteral("PC-ZeroMac"));
+        QVERIFY(!result.hosts[1].mac.has_value());
+        Profile p1 = result.hosts[1].toProfile();
+        QVERIFY(!p1.wake.has_value());
+
+        // Host 2
+        QCOMPARE(result.hosts[2].name, QStringLiteral("PC-StrMac"));
+        QVERIFY(result.hosts[2].mac.has_value());
+        Profile p2 = result.hosts[2].toProfile();
+        QVERIFY(p2.wake.has_value());
+
+        // Host 3
+        QCOMPARE(result.hosts[3].name, QStringLiteral("PC-ZeroStrMac"));
+        QVERIFY(!result.hosts[3].mac.has_value());
+        Profile p3 = result.hosts[3].toProfile();
+        QVERIFY(!p3.wake.has_value());
+    }
+
+    void moonlightSettingsAddressPriority() {
+        MoonlightHost h1;
+        h1.manualAddress = QStringLiteral("192.0.2.1");
+        h1.manualPort = 1111;
+        h1.localAddress = QStringLiteral("192.168.1.10");
+        h1.localPort = 2222;
+        h1.remoteAddress = QStringLiteral("100.64.0.10");
+        h1.remotePort = 3333;
+        QCOMPARE(h1.preferredHost(), QStringLiteral("192.0.2.1"));
+        QCOMPARE(h1.preferredPort(), 1111);
+
+        MoonlightHost h2;
+        h2.localAddress = QStringLiteral("192.168.1.10");
+        h2.localPort = 2222;
+        h2.remoteAddress = QStringLiteral("100.64.0.10");
+        h2.remotePort = 3333;
+        QCOMPARE(h2.preferredHost(), QStringLiteral("192.168.1.10"));
+        QCOMPARE(h2.preferredPort(), 2222);
+
+        MoonlightHost h3;
+        h3.remoteAddress = QStringLiteral("100.64.0.10");
+        h3.remotePort = 3333;
+        QCOMPARE(h3.preferredHost(), QStringLiteral("100.64.0.10"));
+        QCOMPARE(h3.preferredPort(), 3333);
+
+        MoonlightHost h4;
+        QCOMPARE(h4.preferredHost(), QString());
+        QCOMPARE(h4.preferredPort(), 47989);
+    }
+
+    void moonlightSettingsAppModes() {
+        MoonlightHost desktopHost;
+        desktopHost.name = QStringLiteral("Desktop PC");
+        desktopHost.localAddress = QStringLiteral("192.168.1.50");
+        desktopHost.apps = {QStringLiteral("Steam"), QStringLiteral("Desktop"), QStringLiteral("Game")};
+        Profile pDesktop = desktopHost.toProfile();
+        QCOMPARE(pDesktop.client.preset, ClientConfig::Preset::Moonlight);
+        QCOMPARE(pDesktop.client.launchMode, QStringLiteral("stream"));
+        QCOMPARE(pDesktop.client.appName, QStringLiteral("Desktop"));
+
+        MoonlightHost singleHost;
+        singleHost.name = QStringLiteral("Single PC");
+        singleHost.localAddress = QStringLiteral("192.168.1.50");
+        singleHost.apps = {QStringLiteral("Steam")};
+        Profile pSingle = singleHost.toProfile();
+        QCOMPARE(pSingle.client.launchMode, QStringLiteral("stream"));
+        QCOMPARE(pSingle.client.appName, QStringLiteral("Steam"));
+
+        MoonlightHost multiHost;
+        multiHost.name = QStringLiteral("Multi PC");
+        multiHost.localAddress = QStringLiteral("192.168.1.50");
+        multiHost.apps = {QStringLiteral("Steam"), QStringLiteral("Kodi")};
+        Profile pMulti = multiHost.toProfile();
+        QCOMPARE(pMulti.client.launchMode, QStringLiteral("open"));
+        QVERIFY(pMulti.client.appName.isEmpty());
+    }
+
+    void moonlightSettingsHostsBackupFallback() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath(QStringLiteral("backup.ini"));
+        QSettings settings(path, QSettings::IniFormat);
+        settings.beginWriteArray(QStringLiteral("hostsbackup"));
+        settings.setArrayIndex(0);
+        settings.setValue(QStringLiteral("hostname"), QStringLiteral("Backup PC"));
+        settings.setValue(QStringLiteral("localaddress"), QStringLiteral("192.168.1.50"));
+        settings.endArray();
+        settings.sync();
+
+        const auto result = readMoonlightSettings(settings, path);
+        QVERIFY(result.ok);
+        QCOMPARE(result.hosts.size(), std::size_t(1));
+        QCOMPARE(result.hosts[0].name, QStringLiteral("Backup PC"));
+    }
+
+    void moonlightFileMissingAndIni() {
+        const auto missing = readMoonlightFile(QStringLiteral("/nonexistent/fake-moonlight.plist"));
+        QVERIFY(!missing.ok);
+        QVERIFY(!missing.error.isEmpty());
+
+        QTemporaryDir dir;
+        const QString iniPath = dir.filePath(QStringLiteral("test.conf"));
+        QSettings settings(iniPath, QSettings::IniFormat);
+        settings.beginWriteArray(QStringLiteral("hosts"));
+        settings.setArrayIndex(0);
+        settings.setValue(QStringLiteral("hostname"), QStringLiteral("Conf PC"));
+        settings.setValue(QStringLiteral("localaddress"), QStringLiteral("192.168.1.60"));
+        settings.endArray();
+        settings.sync();
+
+        const auto iniResult = readMoonlightFile(iniPath);
+        QVERIFY(iniResult.ok);
+        QCOMPARE(iniResult.hosts.size(), std::size_t(1));
+        QCOMPARE(iniResult.hosts[0].name, QStringLiteral("Conf PC"));
+    }
+
+    void batchCheckerRunsMultipleProfiles() {
+        Profile p1;
+        p1.name = QStringLiteral("PC1");
+        p1.check.host = QStringLiteral("127.0.0.1");
+
+        Profile p2;
+        p2.name = QStringLiteral("PC2");
+        p2.check.host = QStringLiteral("127.0.0.1");
+
+        // Profile 1 probe takes 30ms and is Ready; Profile 2 probe takes 5ms and is NotReady.
+        auto probeFor = [](const Profile& p, QObject* parent) -> Probe* {
+            if (p.name == QLatin1String("PC1")) {
+                ProbeResult r;
+                r.status = ProbeStatus::Ready;
+                r.detail = QStringLiteral("ok");
+                return new FakeProbe(r, 30, parent);
+            } else {
+                ProbeResult r;
+                r.status = ProbeStatus::Refused;
+                r.detail = QStringLiteral("connection refused");
+                return new FakeProbe(r, 5, parent);
+            }
+        };
+
+        BatchChecker checker({p1, p2}, probeFor);
+        std::vector<BatchCheckEntry> itemEntries;
+        std::vector<BatchCheckEntry> finalEntries;
+        bool finishedFired = false;
+        bool startedReturned = false;
+
+        QObject::connect(&checker, &BatchChecker::itemFinished, [&](int, const BatchCheckEntry& entry) {
+            QVERIFY(startedReturned);
+            itemEntries.push_back(entry);
+        });
+        QObject::connect(&checker, &BatchChecker::finished, [&](const std::vector<BatchCheckEntry>& entries) {
+            QVERIFY(startedReturned);
+            finishedFired = true;
+            finalEntries = entries;
+        });
+
+        checker.start();
+        startedReturned = true;
+
+        QTRY_VERIFY_WITH_TIMEOUT(finishedFired, 1000);
+        QCOMPARE(itemEntries.size(), std::size_t(2));
+        QCOMPARE(finalEntries.size(), std::size_t(2));
+
+        // Out-of-order check: PC2 completed first because delay was 5ms vs 30ms
+        QCOMPARE(itemEntries[0].profileName, QStringLiteral("PC2"));
+        QCOMPARE(itemEntries[1].profileName, QStringLiteral("PC1"));
+
+        // Final entries array preserves original order:
+        QCOMPARE(finalEntries[0].profileName, QStringLiteral("PC1"));
+        QVERIFY(finalEntries[0].result.ready());
+        QCOMPARE(finalEntries[1].profileName, QStringLiteral("PC2"));
+        QVERIFY(!finalEntries[1].result.ready());
+    }
+
+    void batchCheckerEmptyProfiles() {
+        BatchChecker checker({});
+        bool finishedFired = false;
+        bool startedReturned = false;
+        std::vector<BatchCheckEntry> resultEntries;
+
+        QObject::connect(&checker, &BatchChecker::finished, [&](const std::vector<BatchCheckEntry>& entries) {
+            QVERIFY(startedReturned);
+            finishedFired = true;
+            resultEntries = entries;
+        });
+
+        checker.start();
+        startedReturned = true;
+
+        QTRY_VERIFY_WITH_TIMEOUT(finishedFired, 500);
+        QVERIFY(resultEntries.empty());
     }
 };
 
