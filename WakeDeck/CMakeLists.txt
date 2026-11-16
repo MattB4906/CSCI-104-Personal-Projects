@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 1.2.0 LANGUAGES CXX)
+project(WakeDeck VERSION 1.3.0 LANGUAGES CXX)
 set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}")  # the one place the version is written
 
 # The release script sets CMAKE_OSX_DEPLOYMENT_TARGET to 13.0 and builds against
@@ -66,6 +66,10 @@ add_library(wakedeck_engine STATIC
   src/engine/Profile.cpp
   src/engine/ProfileStore.h
   src/engine/ProfileStore.cpp
+  src/engine/Moonlight.h
+  src/engine/Moonlight.cpp
+  src/engine/BatchChecker.h
+  src/engine/BatchChecker.cpp
   src/engine/AppLocator.h
   src/engine/ClientLauncher.h
   src/engine/ClientLauncher.cpp
@@ -102,6 +106,8 @@ add_library(wakedeck_ui STATIC
   src/app/WaitProgress.cpp
   src/app/Diagnose.h
   src/app/Diagnose.cpp
+  src/app/UrlCommand.h
+  src/app/UrlCommand.cpp
   src/mac/SystemServices.mm)
 target_include_directories(wakedeck_ui PUBLIC src)
 target_link_libraries(wakedeck_ui PUBLIC wakedeck_engine Qt6::Widgets)

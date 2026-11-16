@@ -40,11 +40,13 @@ void printGeneralUsage(std::ostream& out) {
         << "Usage:\n"
         << "  wakedeck-cli wake    --mac <address> --to <host>|--local-networks [options]\n"
         << "                                                               send a wake request\n"
-        << "  wakedeck-cli check   --host <host> [options]                 ask once whether a service is ready\n"
+        << "  wakedeck-cli check   --host <host>|--profile <name>|--all [options]\n"
+        << "                                                               ask once whether a service is ready\n"
         << "  wakedeck-cli connect --check-host <host> [options]           check, wake if needed, wait until ready\n"
         << "  wakedeck-cli connect --profile <name>                        the same, from a saved profile\n"
         << "  wakedeck-cli launch  --profile <name> [--dry-run]            open the client only\n"
-        << "  wakedeck-cli profile list|show|add|remove|import|export      manage saved profiles\n"
+        << "  wakedeck-cli profile list|show|add|duplicate|move|remove|import|import-moonlight|export\n"
+        << "                                                               manage saved profiles\n"
         << "  wakedeck-cli <command> --help                                options of one command\n"
         << "  wakedeck-cli --version\n";
 }

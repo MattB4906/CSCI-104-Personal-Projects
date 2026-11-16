@@ -9,6 +9,7 @@
 
 #include "Flags.h"
 #include "SessionFlags.h"
+#include "engine/BatchChecker.h"
 #include "engine/ClientLauncher.h"
 #include "engine/ProfileStore.h"
 #include "engine/ServiceProbe.h"
@@ -28,11 +29,16 @@ std::string stamp(const QDateTime& at) {
 void printCheckUsage(std::ostream& out) {
     out << "Usage:\n"
            "  wakedeck-cli check --host <host> [--port 47989] [--kind sunshine|tcp] [--timeout-ms 2000]\n"
+           "  wakedeck-cli check --profile <name> [--store <file>] [--timeout-ms <ms>]\n"
+           "  wakedeck-cli check --all [--store <file>] [--timeout-ms <ms>]\n"
            "\n"
            "Asks once whether the service answers. sunshine: GET /serverinfo over HTTP and read\n"
            "Sunshine's state. tcp: a plain connection to the port. When the service is not ready and\n"
            "the host looks like a Tailscale address, one more line says what Tailscale on this Mac\n"
            "shows (read with Tailscale's own `status --json`).\n"
+           "\n"
+           "With --profile, checks one saved computer. With --all, checks all saved computers in the\n"
+           "profiles store and prints a summary.\n"
            "\n"
            "Exit codes: 0 ready, 1 usage error, 2 not ready (the output says what was observed).\n";
 }
@@ -69,7 +75,7 @@ void printConnectUsage(std::ostream& out) {
 
 int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
     Flags flags;
-    if (const auto error = parseFlags(args, {"--host", "--port", "--kind", "--timeout-ms"}, {}, flags)) {
+    if (const auto error = parseFlags(args, {"--host", "--port", "--kind", "--timeout-ms", "--profile", "--store"}, {"--all"}, flags)) {
         return usageError(*error, printCheckUsage);
     }
     if (flags.help) {
@@ -77,9 +83,98 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
         return 0;
     }
     if (!flags.positional.empty()) return usageError("unexpected argument '" + flags.positional.front() + "'", printCheckUsage);
-    std::string error;
-    const auto target = probeTargetFromFlags(flags, "--host", "--port", "--kind", "--timeout-ms", error);
-    if (!target) return usageError(error, printCheckUsage);
+
+    int modeCount = 0;
+    if (flags.has("--host")) ++modeCount;
+    if (flags.has("--profile")) ++modeCount;
+    if (flags.has("--all")) ++modeCount;
+
+    if (modeCount == 0) return usageError("one of --host, --profile, or --all is required", printCheckUsage);
+    if (modeCount > 1) return usageError("choose only one of --host, --profile, or --all", printCheckUsage);
+
+    if (flags.has("--profile") || flags.has("--all")) {
+        if (flags.has("--port") || flags.has("--kind")) {
+            return usageError("--port and --kind can only be used with --host", printCheckUsage);
+        }
+    }
+
+    std::optional<int> timeoutMsOverride;
+    if (flags.has("--timeout-ms")) {
+        try {
+            int ms = std::stoi(flags.valueOr("--timeout-ms", ""));
+            if (ms < 100 || ms > 60000) return usageError("--timeout-ms must be from 100 to 60000", printCheckUsage);
+            timeoutMsOverride = ms;
+        } catch (...) {
+            return usageError("--timeout-ms must be a whole number of milliseconds", printCheckUsage);
+        }
+    }
+
+    if (flags.has("--all")) {
+        const ProfileStore store(flags.has("--store") ? QString::fromStdString(flags.valueOr("--store", ""))
+                                                      : ProfileStore::defaultPath());
+        const auto loaded = store.load();
+        if (!loaded.ok) {
+            std::cerr << "error: " << loaded.error.toStdString() << "\n";
+            return 2;
+        }
+        if (loaded.profiles.empty()) {
+            std::cout << "No profiles in " << store.path().toStdString() << ".\n";
+            std::cout << "Summary: 0 of 0 ready\n";
+            return 2;
+        }
+
+        QCoreApplication app(argc, argv);
+        BatchChecker checker(loaded.profiles, BatchChecker::defaultProbeForProfile(), timeoutMsOverride ? *timeoutMsOverride : 0, &app);
+        int readyCount = 0;
+        int totalCount = static_cast<int>(loaded.profiles.size());
+
+        QObject::connect(&checker, &BatchChecker::itemFinished, [&](int, const BatchCheckEntry& entry) {
+            if (entry.result.ready()) {
+                std::cout << entry.profileName.toStdString() << ": ready (" << entry.result.detail.toStdString()
+                          << ") after " << entry.result.elapsedMs << " ms" << std::endl;
+            } else {
+                std::cout << entry.profileName.toStdString() << ": not ready: " << statusName(entry.result.status).toStdString()
+                          << " (" << entry.result.detail.toStdString() << ") after " << entry.result.elapsedMs << " ms" << std::endl;
+            }
+        });
+
+        QObject::connect(&checker, &BatchChecker::finished, [&](const std::vector<BatchCheckEntry>& entries) {
+            readyCount = 0;
+            for (const auto& e : entries) {
+                if (e.result.ready()) ++readyCount;
+            }
+            std::cout << "Summary: " << readyCount << " of " << totalCount << " ready" << std::endl;
+            app.quit();
+        });
+
+        checker.start();
+        app.exec();
+        return (totalCount > 0 && readyCount == totalCount) ? 0 : 2;
+    }
+
+    std::optional<ProbeTarget> target;
+    if (flags.has("--profile")) {
+        const QString name = QString::fromStdString(flags.valueOr("--profile", "")).trimmed();
+        if (name.isEmpty()) return usageError("--profile needs a profile name", printCheckUsage);
+        const ProfileStore store(flags.has("--store") ? QString::fromStdString(flags.valueOr("--store", ""))
+                                                      : ProfileStore::defaultPath());
+        const auto loaded = store.load();
+        if (!loaded.ok) {
+            std::cerr << "error: " << loaded.error.toStdString() << "\n";
+            return 2;
+        }
+        const Profile* profile = findProfile(loaded.profiles, name);
+        if (!profile) {
+            std::cerr << "error: profile \"" << name.toStdString() << "\" not found in " << store.path().toStdString() << "\n";
+            return 2;
+        }
+        target = profile->check;
+        if (timeoutMsOverride) target->timeoutMs = *timeoutMsOverride;
+    } else {
+        std::string error;
+        target = probeTargetFromFlags(flags, "--host", "--port", "--kind", "--timeout-ms", error);
+        if (!target) return usageError(error, printCheckUsage);
+    }
 
     QCoreApplication app(argc, argv);
     std::cout << "Checking " << describe(*target).toStdString() << " ..." << std::endl;

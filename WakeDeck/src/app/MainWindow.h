@@ -9,13 +9,18 @@
 #include <QMainWindow>
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "SystemServices.h"
+#include "UrlCommand.h"
+#include "engine/BatchChecker.h"
+#include "engine/Moonlight.h"
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
 #include "engine/Session.h"
@@ -76,8 +81,12 @@ public:
     ~MainWindow() override;
     void setNotifier(std::unique_ptr<Notifier> notifier);
     void setDockProgress(std::unique_ptr<DockProgress> dock);
+    void setDockMenu(std::unique_ptr<DockMenu> dockMenu);
     using ActivePredicate = std::function<bool()>;
     void setAppActivePredicate(ActivePredicate isActive) { isAppActive_ = std::move(isActive); }
+
+    // Opens a wakedeck:// link (connect, check, wake, open).
+    bool openUrl(const QUrl& url, QString* error = nullptr);
 
     // "Notify When Ready" (Run menu): on by default, remembered with QSettings
     // under kNotifyWhenReadyKey. When a Wake & Connect run ends (ready, timed
@@ -97,6 +106,7 @@ public:
     // State, for tests and scripting.
     const std::vector<Profile>& profiles() const { return profiles_; }
     const Profile* currentProfile() const;
+    QString profileNameAt(int row) const;
     // True while a Wake & Connect run or a single step (check, wake, open) is in flight.
     bool isRunning() const { return session_ != nullptr || stepInFlight_; }
     int listCount() const;
@@ -123,7 +133,17 @@ public:
     // Saves an edited computer that was called `oldName`; a new name replaces any
     // computer already called that, and the learned timing moves with it.
     bool updateProfile(const QString& oldName, Profile edited, QString* error = nullptr);
+    bool duplicateProfile(const QString& sourceName, const QString& newName = {}, QString* error = nullptr);
+    bool moveCurrentProfile(int delta, QString* error = nullptr);
     bool loadExample(QString* error = nullptr);
+
+    using MoonlightReaderFn = std::function<MoonlightReadResult()>;
+    void setMoonlightReader(MoonlightReaderFn reader) { moonlightReader_ = std::move(reader); }
+    int importMoonlightHosts(const std::vector<MoonlightHost>& hosts, bool replaceExisting, QString* error = nullptr);
+
+    void startCheckAll();
+    QString profileCheckBadge(const QString& name) const;
+
     void selectProfile(const QString& name);
     void startWakeAndConnect();
     void startCheckOnly();
@@ -136,6 +156,7 @@ signals:
     void runFinished(wakedeck::Outcome outcome);
     void checkFinished(bool ready);
     void stepFinished();
+    void checkAllFinished(int readyCount, int totalCount);
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -165,7 +186,9 @@ private:
     void addNew();
     void editCurrent();
     void deleteCurrent();
+    void duplicateCurrent();
     void importProfile();
+    void importMoonlight();
     void exportCurrent();
     void locateClient();
     void showHowWakingWorks();
@@ -173,6 +196,7 @@ private:
     bool saveProfiles(QString* error);
     bool storeWritable(QString* error);  // false (and says why) while storeRefusal_ is set
     void showError(const QString& title, const QString& text);
+    void updateDockMenu();
     void notifyRunEnded(Outcome outcome, const QString& summary);  // the "ready" notification, when it applies
     void onNotificationsRefused();
     void startProgress();
@@ -231,8 +255,16 @@ private:
     // Notification and progress.
     std::unique_ptr<Notifier> notifier_;
     std::unique_ptr<DockProgress> dock_;
+    std::unique_ptr<DockMenu> dockMenu_;
     ActivePredicate isAppActive_;
     QAction* notifyWhenReadyAction_ = nullptr;
+    MoonlightReaderFn moonlightReader_ = [] { return readMoonlightFile(); };
+    std::map<QString, QString> profileBadges_;
+    QAction* duplicateAction_ = nullptr;
+    QAction* moveUpAction_ = nullptr;
+    QAction* moveDownAction_ = nullptr;
+    QAction* importMoonlightAction_ = nullptr;
+    QAction* checkAllAction_ = nullptr;
     bool refusalNoted_ = false;      // the "switched off" line is shown once per launch (one window per launch)
     QFormLayout* factsLayout_ = nullptr;
     QWidget* progressRow_ = nullptr;

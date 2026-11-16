@@ -49,6 +49,21 @@ QString TailscalePeer::displayName() const {
     return label.isEmpty() ? hostName.trimmed() : label;
 }
 
+QString preferredTailscaleHost(const TailscalePeer& peer) {
+    const QString dns = withoutTrailingDot(peer.dnsName).trimmed();
+    if (!dns.isEmpty()) return dns;
+    for (const QString& addr : peer.addresses) {
+        const QString trimmed = addr.trimmed();
+        if (!trimmed.isEmpty() && !trimmed.contains(QLatin1Char(':'))) {
+            return trimmed;
+        }
+    }
+    if (!peer.addresses.isEmpty()) {
+        return peer.addresses.front().trimmed();
+    }
+    return peer.hostName.trimmed();
+}
+
 TailscaleStatus parseTailscaleStatus(const QByteArray& json) {
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(json, &parseError);

@@ -30,6 +30,10 @@ struct TailscalePeer {
     QString displayName() const;
 };
 
+// Returns dnsName stripped of trailing dots if non-empty;
+// otherwise the first IPv4 entry in addresses (no ':'), or addresses.front(), or hostName.trimmed().
+QString preferredTailscaleHost(const TailscalePeer& peer);
+
 struct TailscaleStatus {
     bool available = false;  // false: the tool is missing, failed, timed out or answered garbage
     QString error;           // why it is unavailable

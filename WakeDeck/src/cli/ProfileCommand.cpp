@@ -8,6 +8,7 @@
 #include "Flags.h"
 #include "SessionFlags.h"
 #include "engine/Explain.h"
+#include "engine/Moonlight.h"
 #include "engine/Profile.h"
 #include "engine/ProfileStore.h"
 #include "engine/TimingHistory.h"
@@ -155,6 +156,107 @@ int exportFile(const ProfileStore& store, const QString& name, const QString& fi
     return 0;
 }
 
+int duplicate(const ProfileStore& store, const QString& name, const QString& explicitNewName, bool replace) {
+    std::vector<Profile> profiles;
+    if (!loadOrExplain(store, profiles)) return kExitProblem;
+    const Profile* source = findProfile(profiles, name);
+    if (!source) return problem(QStringLiteral("profile \"%1\" not found in %2").arg(name, store.path()));
+
+    const QString newName = explicitNewName.isEmpty() ? suggestedDuplicateName(profiles, name) : explicitNewName;
+    if (findProfile(profiles, newName) && !replace) {
+        return problem(QStringLiteral("profile \"%1\" already exists; add --replace to overwrite it").arg(newName));
+    }
+    Profile clone = *source;
+    clone.name = newName;
+    upsertProfile(profiles, clone);
+    if (const int rc = saveOrExplain(store, profiles)) return rc;
+    std::cout << "Duplicated profile \"" << text(name) << "\" as \"" << text(newName) << "\" in " << text(store.path()) << "\n";
+    printProfile(clone);
+    return 0;
+}
+
+int move(const ProfileStore& store, const QString& name, const std::string& toStr) {
+    if (toStr.empty()) return usageError("--to <top|bottom|1..N> is required", printProfileUsage);
+    std::size_t targetIndex = 0;
+    bool targetTop = (toStr == "top");
+    bool targetBottom = (toStr == "bottom");
+    if (!targetTop && !targetBottom) {
+        try {
+            int n = std::stoi(toStr);
+            if (n < 1) return usageError("--to index must be >= 1", printProfileUsage);
+            targetIndex = static_cast<std::size_t>(n - 1);
+        } catch (...) {
+            return usageError("invalid --to destination '" + toStr + "': expected top, bottom, or 1..N", printProfileUsage);
+        }
+    }
+
+    std::vector<Profile> profiles;
+    if (!loadOrExplain(store, profiles)) return kExitProblem;
+    if (!findProfile(profiles, name)) return problem(QStringLiteral("profile \"%1\" not found in %2").arg(name, store.path()));
+
+    if (targetBottom) {
+        targetIndex = profiles.empty() ? 0 : profiles.size() - 1;
+    }
+    if (!moveProfile(profiles, name, targetIndex)) {
+        return problem(QStringLiteral("profile \"%1\" not found in %2").arg(name, store.path()));
+    }
+    if (const int rc = saveOrExplain(store, profiles)) return rc;
+    std::cout << "Moved profile \"" << text(name) << "\" in " << text(store.path()) << "\n";
+    return 0;
+}
+
+int importMoonlight(const ProfileStore& store, const Flags& flags) {
+    const QString from = flags.has("--from") ? QString::fromStdString(flags.valueOr("--from", ""))
+                                             : defaultMoonlightPrefsPath();
+    const auto readResult = readMoonlightFile(from);
+    if (!readResult.ok || readResult.hosts.empty()) {
+        return problem(readResult.error.isEmpty() ? QStringLiteral("No Moonlight hosts found in \"%1\"").arg(from)
+                                                  : readResult.error);
+    }
+
+    if (flags.has("--dry-run")) {
+        std::cout << "Discovered " << readResult.hosts.size() << " computer(s) in " << text(from) << ":\n\n";
+        for (const auto& host : readResult.hosts) {
+            printProfile(host.toProfile());
+            std::cout << "\n";
+        }
+        return 0;
+    }
+
+    std::vector<Profile> profiles;
+    if (!loadOrExplain(store, profiles)) return kExitProblem;
+
+    int importedCount = 0;
+    int skippedCount = 0;
+    const bool replace = flags.has("--replace");
+
+    for (const auto& host : readResult.hosts) {
+        Profile p = host.toProfile();
+        auto it = std::find_if(profiles.begin(), profiles.end(),
+                               [&p](const Profile& existing) { return sameProfileName(existing.name, p.name); });
+        if (it != profiles.end()) {
+            if (replace) {
+                *it = std::move(p);
+                ++importedCount;
+            } else {
+                std::cout << "Skipped existing profile \"" << text(p.name) << "\"\n";
+                ++skippedCount;
+            }
+        } else {
+            profiles.push_back(std::move(p));
+            ++importedCount;
+        }
+    }
+
+    if (const int rc = saveOrExplain(store, profiles)) return rc;
+    std::cout << "Imported " << importedCount << " computer(s) from Moonlight into " << text(store.path());
+    if (skippedCount > 0) {
+        std::cout << " (" << skippedCount << " skipped)";
+    }
+    std::cout << "\n";
+    return 0;
+}
+
 }  // namespace
 
 void printProfileUsage(std::ostream& out) {
@@ -167,8 +269,11 @@ void printProfileUsage(std::ostream& out) {
            "                            [--interval-ms 100] [--resend-s 15]]\n"
            "                           [--client none|moonlight|custom] [--client-path <path>]\n"
            "                           [--launch open|stream] [--app <name>] [--notes <text>] [--replace]\n"
+           "  wakedeck-cli profile duplicate <name> [<new-name>] [--replace]\n"
+           "  wakedeck-cli profile move <name> --to <top|bottom|1..N>\n"
            "  wakedeck-cli profile remove <name>\n"
            "  wakedeck-cli profile import <file.json> [--replace]\n"
+           "  wakedeck-cli profile import-moonlight [--from <file>] [--replace] [--dry-run]\n"
            "  wakedeck-cli profile export <name> <file.json>\n"
            "\n"
            "Every form accepts --store <file> to use another profiles file. The default is\n"
@@ -184,14 +289,17 @@ int runProfile(const std::vector<std::string>& args) {
     valued.insert("--name");
     valued.insert("--notes");
     valued.insert("--store");
+    valued.insert("--to");
+    valued.insert("--from");
     std::set<std::string> switches = sessionSwitchFlags();
     switches.insert("--replace");
+    switches.insert("--dry-run");
     if (const auto error = parseFlags(args, valued, switches, flags)) return usageError(*error, printProfileUsage);
     if (flags.help) {
         printProfileUsage(std::cout);
         return 0;
     }
-    if (flags.positional.empty()) return usageError("a subcommand is required: list, show, add, remove, import or export", printProfileUsage);
+    if (flags.positional.empty()) return usageError("a subcommand is required: list, show, add, remove, duplicate, move, import, import-moonlight or export", printProfileUsage);
 
     const ProfileStore store(flags.has("--store") ? QString::fromStdString(flags.valueOr("--store", ""))
                                                   : ProfileStore::defaultPath());
@@ -211,6 +319,15 @@ int runProfile(const std::vector<std::string>& args) {
         if (extra != 0) return usageError("add takes its settings as options; see --help", printProfileUsage);
         return add(store, flags);
     }
+    if (sub == "duplicate") {
+        if (extra < 1 || extra > 2) return usageError("duplicate takes <name> [<new-name>]", printProfileUsage);
+        return duplicate(store, positional(1), extra == 2 ? positional(2) : QString(), flags.has("--replace"));
+    }
+    if (sub == "move") {
+        if (extra != 1) return usageError("move needs exactly one profile name and --to", printProfileUsage);
+        if (!flags.has("--to")) return usageError("move requires --to <top|bottom|1..N>", printProfileUsage);
+        return move(store, positional(1), flags.valueOr("--to", ""));
+    }
     if (sub == "remove") {
         if (extra != 1) return usageError("remove needs exactly one profile name", printProfileUsage);
         return remove(store, positional(1));
@@ -218,6 +335,10 @@ int runProfile(const std::vector<std::string>& args) {
     if (sub == "import") {
         if (extra != 1) return usageError("import needs exactly one file", printProfileUsage);
         return importFile(store, positional(1), flags.has("--replace"));
+    }
+    if (sub == "import-moonlight") {
+        if (extra != 0) return usageError("import-moonlight takes options only; see --help", printProfileUsage);
+        return importMoonlight(store, flags);
     }
     if (sub == "export") {
         if (extra != 2) return usageError("export needs a profile name and a file", printProfileUsage);

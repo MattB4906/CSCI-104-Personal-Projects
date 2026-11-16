@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonValue>
+#include <QRegularExpression>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -429,6 +430,39 @@ void upsertProfile(std::vector<Profile>& profiles, Profile profile) {
         }
     }
     profiles.push_back(std::move(profile));
+}
+
+QString suggestedDuplicateName(const std::vector<Profile>& existing, const QString& sourceName) {
+    QString stem = sourceName.trimmed();
+    static const QRegularExpression copySuffix(QStringLiteral(" Copy( \\d+)?$"));
+    const auto match = copySuffix.match(stem);
+    if (match.hasMatch()) {
+        stem = stem.left(match.capturedStart()).trimmed();
+    }
+    if (stem.isEmpty()) stem = sourceName.trimmed();
+
+    const QString candidate1 = QStringLiteral("%1 Copy").arg(stem);
+    if (!findProfile(existing, candidate1)) return candidate1;
+
+    for (int i = 2;; ++i) {
+        const QString candidate = QStringLiteral("%1 Copy %2").arg(stem).arg(i);
+        if (!findProfile(existing, candidate)) return candidate;
+    }
+}
+
+bool moveProfile(std::vector<Profile>& profiles, const QString& name, std::size_t targetIndex) {
+    if (profiles.empty()) return false;
+    const auto it = std::find_if(profiles.begin(), profiles.end(),
+                                 [&name](const Profile& p) { return sameProfileName(p.name, name); });
+    if (it == profiles.end()) return false;
+    const std::size_t currentIndex = static_cast<std::size_t>(std::distance(profiles.begin(), it));
+    const std::size_t clampedTarget = std::min(targetIndex, profiles.size() - 1);
+    if (currentIndex == clampedTarget) return true;
+
+    Profile p = std::move(*it);
+    profiles.erase(it);
+    profiles.insert(profiles.begin() + static_cast<std::ptrdiff_t>(clampedTarget), std::move(p));
+    return true;
 }
 
 }  // namespace wakedeck

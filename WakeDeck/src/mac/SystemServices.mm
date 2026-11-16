@@ -7,7 +7,9 @@
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
 
+#include <QAction>
 #include <QCoreApplication>
+#include <QMenu>
 #include <QMetaObject>
 #include <QPointer>
 #include <algorithm>
@@ -177,6 +179,53 @@ private:
     WakeDeckDockProgressView* view_ = nil;
 };
 
+class SystemDockMenu final : public app::DockMenu {
+public:
+    explicit SystemDockMenu(QObject* parent = nullptr) : app::DockMenu(parent), menu_(new QMenu()) {
+        menu_->setAsDockMenu();
+    }
+    ~SystemDockMenu() override {
+        delete menu_;
+    }
+    void setState(const QStringList& profileNames, bool running, const QString& runningProfile, bool cancellable) override {
+        menu_->clear();
+        if (running) {
+            QString statusText;
+            if (!runningProfile.isEmpty()) {
+                statusText = QStringLiteral("%1 — running…").arg(runningProfile);
+            } else {
+                statusText = QStringLiteral("Checking all computers…");
+            }
+            QAction* statusAction = menu_->addAction(statusText);
+            statusAction->setEnabled(false);
+            if (cancellable) {
+                QAction* cancelAction = menu_->addAction(QStringLiteral("Cancel"));
+                QObject::connect(cancelAction, &QAction::triggered, this, &DockMenu::cancelRequested);
+            }
+            menu_->addSeparator();
+            for (const QString& name : profileNames) {
+                QAction* act = menu_->addAction(QStringLiteral("Wake & Connect — %1").arg(name));
+                act->setEnabled(false);
+            }
+        } else {
+            if (profileNames.isEmpty()) {
+                QAction* act = menu_->addAction(QStringLiteral("No computers saved"));
+                act->setEnabled(false);
+            } else {
+                for (const QString& name : profileNames) {
+                    QAction* act = menu_->addAction(QStringLiteral("Wake & Connect — %1").arg(name));
+                    QObject::connect(act, &QAction::triggered, this, [this, name] {
+                        emit connectRequested(name);
+                    });
+                }
+            }
+        }
+    }
+
+private:
+    QMenu* menu_ = nullptr;
+};
+
 }  // namespace
 
 QString applicationBundleIdentifier() {
@@ -185,6 +234,29 @@ QString applicationBundleIdentifier() {
         if (![bundle.bundleURL.pathExtension isEqualToString:@"app"]) return QString();
         NSString* identifier = bundle.bundleIdentifier;
         return identifier.length > 0 ? QString::fromNSString(identifier) : QString();
+    }
+}
+
+QString registeredUrlScheme() {
+    @autoreleasepool {
+        NSBundle* bundle = [NSBundle mainBundle];
+        NSArray* urlTypes = [bundle objectForInfoDictionaryKey:@"CFBundleURLTypes"];
+        if ([urlTypes isKindOfClass:[NSArray class]]) {
+            for (id type in urlTypes) {
+                if ([type isKindOfClass:[NSDictionary class]]) {
+                    NSArray* schemes = [type objectForKey:@"CFBundleURLSchemes"];
+                    if ([schemes isKindOfClass:[NSArray class]]) {
+                        for (id s in schemes) {
+                            if ([s isKindOfClass:[NSString class]] &&
+                                [s caseInsensitiveCompare:@"wakedeck"] == NSOrderedSame) {
+                                return QStringLiteral("wakedeck");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return QStringLiteral("none");
     }
 }
 
@@ -212,6 +284,10 @@ void readNotificationPermission(std::function<void(const QString& permission)> d
 
 std::unique_ptr<app::DockProgress> makeSystemDockProgress() {
     return std::make_unique<SystemDockProgress>();
+}
+
+std::unique_ptr<app::DockMenu> makeSystemDockMenu() {
+    return std::make_unique<SystemDockMenu>();
 }
 
 bool dockTileAvailable() {

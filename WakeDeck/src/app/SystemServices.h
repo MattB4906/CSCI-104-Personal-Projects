@@ -52,11 +52,30 @@ public:
     void clear() override {}
 };
 
+class DockMenu : public QObject {
+    Q_OBJECT
+public:
+    explicit DockMenu(QObject* parent = nullptr) : QObject(parent) {}
+    virtual void setState(const QStringList& profileNames, bool running, const QString& runningProfile, bool cancellable) = 0;
+
+signals:
+    void connectRequested(const QString& profileName);
+    void cancelRequested();
+};
+
+class NoDockMenu final : public DockMenu {
+    Q_OBJECT
+public:
+    explicit NoDockMenu(QObject* parent = nullptr) : DockMenu(parent) {}
+    void setState(const QStringList&, bool, const QString&, bool) override {}
+};
+
 // True when the Qt platform is "cocoa", the only one where the system services are used.
 bool systemServicesAvailable();
 // The production defaults: the macOS implementations on cocoa, otherwise the no-ops.
 std::unique_ptr<Notifier> makeDefaultNotifier();
 std::unique_ptr<DockProgress> makeDefaultDockProgress();
+std::unique_ptr<DockMenu> makeDefaultDockMenu();
 
 }  // namespace wakedeck::app
 
@@ -66,6 +85,9 @@ namespace wakedeck::platform {
 // The main bundle's identifier when this process is an application bundle
 // (.app) that has one; empty otherwise (test runners, the command-line tool).
 QString applicationBundleIdentifier();
+
+// The registered URL scheme from CFBundleURLTypes ("wakedeck" or "none").
+QString registeredUrlScheme();
 
 // UserNotifications. Without an application bundle identifier the notifier is
 // unavailable and never touches the notification center.
@@ -79,6 +101,9 @@ void readNotificationPermission(std::function<void(const QString& permission)> d
 // NSDockTile with a view that draws the application icon and the bar itself.
 std::unique_ptr<app::DockProgress> makeSystemDockProgress();
 bool dockTileAvailable();
+
+// The macOS Dock menu attached to NSApp.
+std::unique_ptr<app::DockMenu> makeSystemDockMenu();
 
 // Draws the same picture as the Dock progress, at `fraction`, into a PNG file.
 bool renderDockProgressPicture(double fraction, const QString& pngPath, QString* error);

@@ -18,4 +18,9 @@ std::unique_ptr<DockProgress> makeDefaultDockProgress() {
     return std::make_unique<NoDockProgress>();
 }
 
+std::unique_ptr<DockMenu> makeDefaultDockMenu() {
+    if (systemServicesAvailable()) return platform::makeSystemDockMenu();
+    return std::make_unique<NoDockMenu>();
+}
+
 }  // namespace wakedeck::app

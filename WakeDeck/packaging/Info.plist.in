@@ -36,5 +36,18 @@
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>WakeDeck sends the wake request to computers on your network and checks whether their service is ready.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLName</key>
+            <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}.url</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>wakedeck</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

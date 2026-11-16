@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "engine/Profile.h"
+#include "engine/Tailscale.h"
 
 class QCheckBox;
 class QComboBox;
@@ -27,14 +28,22 @@ public:
     std::optional<Profile> collect(QString* error) const;  // reads and validates the fields
     Profile result() const { return result_; }             // valid after accept()
 
+    void setTailscaleReaderFactory(TailscaleReaderFactory factory) {
+        tailscaleReaderFactory_ = std::move(factory);
+    }
+    void applyTailscalePeer(const TailscalePeer& peer);
+
 private:
     void buildUi();
     void updateEnabledFields();
     void onAccept();
     void testWake();
     void testCheck();
+    void chooseTailscale();
     void findClient();
     void browseClient();
+
+    TailscaleReaderFactory tailscaleReaderFactory_ = makeTailscaleReader;
 
     QLineEdit* nameEdit_ = nullptr;
     QLineEdit* notesEdit_ = nullptr;
@@ -52,6 +61,7 @@ private:
 
     QComboBox* kindCombo_ = nullptr;
     QLineEdit* hostEdit_ = nullptr;
+    QPushButton* chooseTailscaleButton_ = nullptr;
     QSpinBox* portSpin_ = nullptr;
     QSpinBox* probeTimeoutSpin_ = nullptr;
     QSpinBox* pollSpin_ = nullptr;

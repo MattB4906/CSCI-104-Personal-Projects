@@ -2,8 +2,10 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFont>
 #include <QFormLayout>
@@ -28,9 +30,12 @@
 #include <utility>
 
 #include "ProfileEditorDialog.h"
+#include "UrlCommand.h"
 #include "WaitProgress.h"
+#include "engine/BatchChecker.h"
 #include "engine/ClientLauncher.h"
 #include "engine/Explain.h"
+#include "engine/Moonlight.h"
 #include "engine/ProcessWatcher.h"
 #include "engine/QtWaker.h"
 #include "engine/ServiceProbe.h"
@@ -69,6 +74,7 @@ MainWindow::MainWindow(ProfileStore store, FactoriesFor factoriesFor, QWidget* p
     };
     setNotifier(makeDefaultNotifier());
     setDockProgress(makeDefaultDockProgress());
+    setDockMenu(makeDefaultDockMenu());
     isAppActive_ = [] { return QGuiApplication::applicationState() == Qt::ApplicationActive; };
     clientWatcher_ = new ProcessWatcher(this);
     connect(clientWatcher_, &ProcessWatcher::exited, this, &MainWindow::onClientExited);
@@ -95,6 +101,25 @@ void MainWindow::buildUi() {
     leftLayout->addWidget(computersTitle);
     list_ = new QListWidget(left);
     list_->setObjectName(QStringLiteral("profileList"));
+    list_->setSelectionMode(QAbstractItemView::SingleSelection);
+    list_->setDragDropMode(QAbstractItemView::InternalMove);
+    list_->setDefaultDropAction(Qt::MoveAction);
+    connect(list_->model(), &QAbstractItemModel::rowsMoved, this, [this] {
+        if (isRunning() || !storeRefusal_.isEmpty()) return;
+        std::vector<Profile> reordered;
+        reordered.reserve(profiles_.size());
+        for (int i = 0; i < list_->count(); ++i) {
+            const QString name = profileNameAt(i);
+            if (const Profile* p = findProfile(profiles_, name)) {
+                reordered.push_back(*p);
+            }
+        }
+        if (reordered.size() == profiles_.size()) {
+            profiles_ = std::move(reordered);
+            saveProfiles(nullptr);
+            updateDockMenu();
+        }
+    });
     leftLayout->addWidget(list_, 1);
     auto* leftButtons = new QHBoxLayout;
     auto* addButton = new QPushButton(QStringLiteral("Add…"), left);
@@ -254,9 +279,21 @@ void MainWindow::buildMenus() {
     QAction* add = file->addAction(QStringLiteral("&New Computer…"), this, &MainWindow::addNew);
     add->setShortcut(QKeySequence::New);
     file->addAction(QStringLiteral("&Edit Computer…"), this, &MainWindow::editCurrent);
+    duplicateAction_ = file->addAction(QStringLiteral("&Duplicate Computer…"), this, &MainWindow::duplicateCurrent);
+    duplicateAction_->setObjectName(QStringLiteral("duplicateAction"));
+    duplicateAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
     file->addAction(QStringLiteral("&Delete Computer"), this, &MainWindow::deleteCurrent);
     file->addSeparator();
+    moveUpAction_ = file->addAction(QStringLiteral("Move &Up"), this, [this] { moveCurrentProfile(-1); });
+    moveUpAction_->setObjectName(QStringLiteral("moveUpAction"));
+    moveUpAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Up));
+    moveDownAction_ = file->addAction(QStringLiteral("Move &Down"), this, [this] { moveCurrentProfile(1); });
+    moveDownAction_->setObjectName(QStringLiteral("moveDownAction"));
+    moveDownAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Down));
+    file->addSeparator();
     file->addAction(QStringLiteral("&Import Profile…"), this, &MainWindow::importProfile);
+    importMoonlightAction_ = file->addAction(QStringLiteral("Import from &Moonlight…"), this, &MainWindow::importMoonlight);
+    importMoonlightAction_->setObjectName(QStringLiteral("importMoonlightAction"));
     file->addAction(QStringLiteral("E&xport Profile…"), this, &MainWindow::exportCurrent);
     file->addAction(QStringLiteral("Load E&xample"), this, [this] {
         QString error;
@@ -267,6 +304,9 @@ void MainWindow::buildMenus() {
     QAction* wakeConnect = run->addAction(QStringLiteral("&Wake && Connect"), this, &MainWindow::startWakeAndConnect);
     wakeConnect->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return));
     run->addAction(QStringLiteral("&Check Now"), this, &MainWindow::startCheckOnly);
+    checkAllAction_ = run->addAction(QStringLiteral("Check &All Computers"), this, &MainWindow::startCheckAll);
+    checkAllAction_->setObjectName(QStringLiteral("checkAllAction"));
+    checkAllAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_K));
     run->addAction(QStringLiteral("Wake &Only"), this, &MainWindow::startWakeOnly);
     run->addAction(QStringLiteral("&Open Client"), this, &MainWindow::startOpenClient);
     run->addSeparator();
@@ -330,15 +370,33 @@ void MainWindow::showEvent(QShowEvent* event) {
 }
 
 void MainWindow::refreshList() {
-    const QString previous = list_->currentItem() ? list_->currentItem()->text() : QString();
+    const QString previous = currentProfile() ? currentProfile()->name : QString();
     list_->clear();
-    for (const Profile& profile : profiles_) list_->addItem(profile.name);
+    for (const Profile& profile : profiles_) {
+        auto* item = new QListWidgetItem(list_);
+        item->setData(Qt::UserRole, profile.name);
+        const QString badge = profileCheckBadge(profile.name);
+        if (!badge.isEmpty()) {
+            item->setText(QStringLiteral("%1 — %2").arg(profile.name, badge));
+        } else {
+            item->setText(profile.name);
+        }
+    }
     int row = 0;
     for (int i = 0; i < list_->count(); ++i) {
-        if (sameProfileName(list_->item(i)->text(), previous)) row = i;
+        if (sameProfileName(profileNameAt(i), previous)) row = i;
     }
     if (list_->count() > 0) list_->setCurrentRow(row);
     refreshDetails();
+    updateDockMenu();
+}
+
+QString MainWindow::profileNameAt(int row) const {
+    if (row < 0 || row >= list_->count()) return {};
+    auto* item = list_->item(row);
+    if (!item) return {};
+    const QVariant data = item->data(Qt::UserRole);
+    return data.isValid() && !data.toString().isEmpty() ? data.toString() : item->text();
 }
 
 void MainWindow::refreshDetails() {
@@ -368,8 +426,8 @@ void MainWindow::refreshDetails() {
 
 const Profile* MainWindow::currentProfile() const {
     const int row = list_->currentRow();
-    if (row < 0 || row >= static_cast<int>(profiles_.size())) return nullptr;
-    return &profiles_[static_cast<std::size_t>(row)];
+    if (row < 0 || row >= list_->count()) return nullptr;
+    return findProfile(profiles_, profileNameAt(row));
 }
 
 const Profile* MainWindow::runProfile() const {
@@ -433,7 +491,7 @@ bool MainWindow::loadExample(QString* error) {
 
 void MainWindow::selectProfile(const QString& name) {
     for (int i = 0; i < list_->count(); ++i) {
-        if (sameProfileName(list_->item(i)->text(), name)) {
+        if (sameProfileName(profileNameAt(i), name)) {
             list_->setCurrentRow(i);
             return;
         }
@@ -465,16 +523,78 @@ void MainWindow::editCurrent() {
     updateProfile(oldName, std::move(edited));
 }
 
+void MainWindow::duplicateCurrent() {
+    const Profile* current = currentProfile();
+    if (!current || !storeWritable(nullptr) || isRunning()) return;
+    Profile clone = *current;
+    clone.name = suggestedDuplicateName(profiles_, current->name);
+    ProfileEditorDialog dialog(clone, false, this);
+    if (dialog.exec() == QDialog::Accepted) {
+        Profile edited = dialog.result();
+        if (findProfile(profiles_, edited.name)) {
+            const auto answer = QMessageBox::question(
+                this, QStringLiteral("Computer already exists"),
+                QStringLiteral("A computer called \"%1\" already exists. Replace it?").arg(edited.name));
+            if (answer != QMessageBox::Yes) return;
+        }
+        addProfile(std::move(edited));
+    }
+}
+
+bool MainWindow::duplicateProfile(const QString& sourceName, const QString& newName, QString* error) {
+    if (!storeWritable(error)) return false;
+    const Profile* source = findProfile(profiles_, sourceName);
+    if (!source) {
+        if (error) *error = QStringLiteral("Computer \"%1\" was not found").arg(sourceName);
+        return false;
+    }
+    const QString targetName = newName.isEmpty() ? suggestedDuplicateName(profiles_, sourceName) : newName;
+    Profile copy = *source;
+    copy.name = targetName;
+    return addProfile(std::move(copy), error);
+}
+
+bool MainWindow::moveCurrentProfile(int delta, QString* error) {
+    if (!storeWritable(error) || isRunning()) return false;
+    const int row = list_->currentRow();
+    if (row < 0 || row >= static_cast<int>(profiles_.size())) return false;
+    const int targetRow = row + delta;
+    if (targetRow < 0 || targetRow >= static_cast<int>(profiles_.size())) return false;
+    const QString name = profileNameAt(row);
+    if (!moveProfile(profiles_, name, static_cast<std::size_t>(targetRow))) return false;
+    if (!saveProfiles(error)) return false;
+    refreshList();
+    selectProfile(name);
+    return true;
+}
+
 bool MainWindow::updateProfile(const QString& oldName, Profile edited, QString* error) {
     if (!storeWritable(error)) return false;
+    const auto it = std::find_if(profiles_.begin(), profiles_.end(),
+                                 [&oldName](const Profile& p) { return sameProfileName(p.name, oldName); });
+    if (it == profiles_.end()) {
+        if (error) *error = QStringLiteral("Computer \"%1\" was not found").arg(oldName);
+        return false;
+    }
+    std::size_t oldIndex = static_cast<std::size_t>(std::distance(profiles_.begin(), it));
     const QString newName = edited.name;
     const bool renamed = !sameProfileName(newName, oldName);
     if (renamed) {
-        removeProfile(profiles_, newName);  // the one being replaced, if any
-        removeProfile(profiles_, oldName);
+        const auto rep = std::find_if(profiles_.begin(), profiles_.end(),
+                                      [&newName](const Profile& p) { return sameProfileName(p.name, newName); });
+        if (rep != profiles_.end()) {
+            const std::size_t repIndex = static_cast<std::size_t>(std::distance(profiles_.begin(), rep));
+            profiles_.erase(rep);
+            if (repIndex < oldIndex) {
+                --oldIndex;
+            }
+        }
     }
-    if (!addProfile(std::move(edited), error)) return false;
+    profiles_[oldIndex] = std::move(edited);
+    if (!saveProfiles(error)) return false;
     if (renamed) moveHistory(oldName, newName);
+    refreshList();
+    selectProfile(newName);
     return true;
 }
 
@@ -517,6 +637,230 @@ void MainWindow::exportCurrent() {
     if (!ProfileStore::writeProfileFile(*profile, file, &error)) showError(QStringLiteral("Could not export the profile"), error);
 }
 
+int MainWindow::importMoonlightHosts(const std::vector<MoonlightHost>& hosts, bool replaceExisting, QString* error) {
+    if (!storeWritable(error)) return -1;
+    int imported = 0;
+    for (const auto& h : hosts) {
+        Profile p = h.toProfile();
+        auto it = std::find_if(profiles_.begin(), profiles_.end(),
+                               [&p](const Profile& existing) { return sameProfileName(existing.name, p.name); });
+        if (it != profiles_.end()) {
+            if (replaceExisting) {
+                *it = std::move(p);
+                ++imported;
+            }
+        } else {
+            profiles_.push_back(std::move(p));
+            ++imported;
+        }
+    }
+    if (!saveProfiles(error)) return -1;
+    refreshList();
+    return imported;
+}
+
+void MainWindow::importMoonlight() {
+    if (!storeWritable(nullptr)) return;
+    const auto result = moonlightReader_ ? moonlightReader_() : readMoonlightFile();
+    if (!result.ok || result.hosts.empty()) {
+        showError(QStringLiteral("Could not import from Moonlight"),
+                  result.error.isEmpty() ? QStringLiteral("No computers found in Moonlight preferences.") : result.error);
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Import from Moonlight"));
+    auto* layout = new QVBoxLayout(&dlg);
+    auto* hint = new QLabel(QStringLiteral("Select computers to import from Moonlight:"), &dlg);
+    layout->addWidget(hint);
+
+    auto* list = new QListWidget(&dlg);
+    for (std::size_t i = 0; i < result.hosts.size(); ++i) {
+        const auto& h = result.hosts[i];
+        QString desc = h.name + QStringLiteral(" (") + h.preferredHost() + QStringLiteral(")");
+        auto* item = new QListWidgetItem(desc, list);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Checked);
+        item->setData(Qt::UserRole, static_cast<int>(i));
+    }
+    layout->addWidget(list);
+
+    auto* replaceCheck = new QCheckBox(QStringLiteral("Replace existing computers with the same name"), &dlg);
+    replaceCheck->setChecked(false);
+    layout->addWidget(replaceCheck);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dlg.exec() == QDialog::Accepted) {
+        std::vector<MoonlightHost> selected;
+        for (int row = 0; row < list->count(); ++row) {
+            auto* item = list->item(row);
+            if (item && item->checkState() == Qt::Checked) {
+                const int idx = item->data(Qt::UserRole).toInt();
+                if (idx >= 0 && idx < static_cast<int>(result.hosts.size())) {
+                    selected.push_back(result.hosts[static_cast<std::size_t>(idx)]);
+                }
+            }
+        }
+        if (!selected.empty()) {
+            QString error;
+            const int imported = importMoonlightHosts(selected, replaceCheck->isChecked(), &error);
+            if (imported < 0) {
+                showError(QStringLiteral("Could not import"), error);
+            } else {
+                note(QStringLiteral("Imported %1 computer(s) from Moonlight").arg(imported));
+            }
+        }
+    }
+}
+
+void MainWindow::setDockMenu(std::unique_ptr<DockMenu> dockMenu) {
+    dockMenu_ = std::move(dockMenu);
+    if (dockMenu_) {
+        connect(dockMenu_.get(), &DockMenu::connectRequested, this, [this](const QString& name) {
+            if (!isRunning()) {
+                selectProfile(name);
+                startWakeAndConnect();
+            }
+        });
+        connect(dockMenu_.get(), &DockMenu::cancelRequested, this, [this] {
+            cancelRun();
+        });
+        updateDockMenu();
+    }
+}
+
+void MainWindow::updateDockMenu() {
+    if (!dockMenu_) return;
+    QStringList names;
+    names.reserve(static_cast<int>(profiles_.size()));
+    for (const auto& p : profiles_) names << p.name;
+    dockMenu_->setState(names, isRunning(), runProfileName_, session_ != nullptr);
+}
+
+bool MainWindow::openUrl(const QUrl& url, QString* error) {
+    QString parseError;
+    const auto cmd = parseWakeDeckUrl(url, &parseError);
+    if (!cmd) {
+        if (error) *error = parseError;
+        showError(QStringLiteral("Could not open link"), parseError);
+        return false;
+    }
+    if (isRunning()) {
+        const QString busyMsg = QStringLiteral("Another run is already in progress. Cancel it or wait for it to finish.");
+        if (error) *error = busyMsg;
+        showError(QStringLiteral("WakeDeck is busy"), busyMsg);
+        return false;
+    }
+    const Profile* profile = findProfile(profiles_, cmd->profileName);
+    if (!profile) {
+        const QString notFound = QStringLiteral("Computer \"%1\" was not found.").arg(cmd->profileName);
+        if (error) *error = notFound;
+        showError(QStringLiteral("Computer not found"), notFound);
+        return false;
+    }
+    if (cmd->action == UrlAction::Wake && !profile->wake.has_value()) {
+        const QString noWake = QStringLiteral("Computer \"%1\" has waking switched off.").arg(cmd->profileName);
+        if (error) *error = noWake;
+        showError(QStringLiteral("Cannot wake"), noWake);
+        return false;
+    }
+    if (cmd->action == UrlAction::Open && profile->client.preset == ClientConfig::Preset::None) {
+        const QString noClient = QStringLiteral("Computer \"%1\" has no client configured.").arg(cmd->profileName);
+        if (error) *error = noClient;
+        showError(QStringLiteral("Cannot open client"), noClient);
+        return false;
+    }
+    selectProfile(profile->name);
+    switch (cmd->action) {
+    case UrlAction::Connect:
+        startWakeAndConnect();
+        break;
+    case UrlAction::Check:
+        startCheckOnly();
+        break;
+    case UrlAction::Wake:
+        startWakeOnly();
+        break;
+    case UrlAction::Open:
+        startOpenClient();
+        break;
+    }
+    return true;
+}
+
+QString MainWindow::profileCheckBadge(const QString& name) const {
+    for (const auto& pair : profileBadges_) {
+        if (sameProfileName(pair.first, name)) {
+            return pair.second;
+        }
+    }
+    return {};
+}
+
+void MainWindow::startCheckAll() {
+    if (isRunning()) return;
+    if (profiles_.empty()) {
+        serviceStatus_->setText(QStringLiteral("checked all: 0 of 0 ready"));
+        emit checkAllFinished(0, 0);
+        return;
+    }
+
+    Profile dummy;
+    dummy.name.clear();
+    beginStep(dummy);
+    runProfileName_.clear();
+    updateDockMenu();
+
+    note(QStringLiteral("Checking all %1 computers…").arg(profiles_.size()));
+
+    auto* checker = new BatchChecker(
+        profiles_,
+        [this](const Profile& p, QObject* parent) -> Probe* {
+            return factoriesFor_(p).probe(p.check, parent);
+        },
+        0,
+        this);
+
+    connect(checker, &BatchChecker::itemFinished, this, [this](int, const BatchCheckEntry& entry) {
+        const QString badge = entry.result.ready() ? QStringLiteral("ready") : QStringLiteral("not ready");
+        profileBadges_[entry.profileName] = badge;
+
+        for (int row = 0; row < list_->count(); ++row) {
+            if (sameProfileName(profileNameAt(row), entry.profileName)) {
+                list_->item(row)->setText(QStringLiteral("%1 — %2").arg(entry.profileName, badge));
+                break;
+            }
+        }
+        note(QStringLiteral("%1: %2 (%3, %4 ms)")
+                 .arg(entry.profileName, badge, entry.result.detail)
+                 .arg(entry.result.elapsedMs),
+             entry.result.ready() ? EventKind::Ready : EventKind::Failure);
+    });
+
+    connect(checker, &BatchChecker::finished, this, [this, checker](const std::vector<BatchCheckEntry>& entries) {
+        int readyCount = 0;
+        for (const auto& e : entries) {
+            if (e.result.ready()) ++readyCount;
+        }
+        int totalCount = static_cast<int>(entries.size());
+        serviceStatus_->setText(QStringLiteral("checked all: %1 of %2 ready").arg(readyCount).arg(totalCount));
+        note(QStringLiteral("Checked %1 computer(s): %2 ready, %3 not ready")
+                 .arg(totalCount)
+                 .arg(readyCount)
+                 .arg(totalCount - readyCount),
+             EventKind::Info);
+        endStep();
+        checker->deleteLater();
+        emit checkAllFinished(readyCount, totalCount);
+    });
+
+    checker->start();
+}
+
 // ---- Runs -------------------------------------------------------------------
 
 void MainWindow::setRunning(bool running) {
@@ -530,6 +874,19 @@ void MainWindow::setRunning(bool running) {
     editButton_->setEnabled(!running && profile);
     deleteButton_->setEnabled(!running && profile);
     list_->setEnabled(!running);
+
+    const bool canDrag = !running && storeRefusal_.isEmpty();
+    list_->setDragDropMode(canDrag ? QAbstractItemView::InternalMove : QAbstractItemView::NoDragDrop);
+
+    const int row = list_->currentRow();
+    const int count = list_->count();
+    const bool canAct = !running && storeRefusal_.isEmpty();
+    if (duplicateAction_) duplicateAction_->setEnabled(canAct && profile != nullptr);
+    if (moveUpAction_) moveUpAction_->setEnabled(canAct && profile != nullptr && row > 0);
+    if (moveDownAction_) moveDownAction_->setEnabled(canAct && profile != nullptr && row >= 0 && row < count - 1);
+    if (importMoonlightAction_) importMoonlightAction_->setEnabled(canAct);
+    if (checkAllAction_) checkAllAction_->setEnabled(!running && !profiles_.empty());
+    updateDockMenu();
 }
 
 void MainWindow::beginStep(const Profile& profile) {
@@ -914,6 +1271,7 @@ void MainWindow::locateClient() {
 // ---- Notification and progress ------------------------------------------------
 
 MainWindow::~MainWindow() {
+    dockMenu_.reset();
     stopProgress();  // the Dock icon goes back to normal with the window
 }
 

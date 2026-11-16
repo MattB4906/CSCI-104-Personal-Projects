@@ -9,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
@@ -113,6 +114,11 @@ void ProfileEditorDialog::buildUi() {
     hostEdit_ = new QLineEdit(checkBox);
     hostEdit_->setObjectName(QStringLiteral("hostEdit"));
     hostEdit_->setPlaceholderText(QStringLiteral("the computer's Tailscale name or address"));
+    chooseTailscaleButton_ = new QPushButton(QStringLiteral("Choose from Tailscale…"), checkBox);
+    chooseTailscaleButton_->setObjectName(QStringLiteral("chooseTailscaleButton"));
+    auto* hostRow = new QHBoxLayout;
+    hostRow->addWidget(hostEdit_, 1);
+    hostRow->addWidget(chooseTailscaleButton_);
     portSpin_ = new QSpinBox(checkBox);
     portSpin_->setRange(1, 65535);
     probeTimeoutSpin_ = new QSpinBox(checkBox);
@@ -125,7 +131,7 @@ void ProfileEditorDialog::buildUi() {
     overallSpin_->setRange(1, 3600);
     overallSpin_->setSuffix(QStringLiteral(" s"));
     checkLayout->addRow(QStringLiteral("Service:"), kindCombo_);
-    checkLayout->addRow(QStringLiteral("Host:"), hostEdit_);
+    checkLayout->addRow(QStringLiteral("Host:"), hostRow);
     checkLayout->addRow(QStringLiteral("Port:"), portSpin_);
     checkLayout->addRow(QStringLiteral("Each check waits:"), probeTimeoutSpin_);
     checkLayout->addRow(QStringLiteral("Check every:"), pollSpin_);
@@ -142,6 +148,7 @@ void ProfileEditorDialog::buildUi() {
         if (index == 0 && portSpin_->value() == 3389) portSpin_->setValue(47989);
         if (index == 1 && portSpin_->value() == 47989) portSpin_->setValue(3389);
     });
+    connect(chooseTailscaleButton_, &QPushButton::clicked, this, &ProfileEditorDialog::chooseTailscale);
     connect(checkTestButton_, &QPushButton::clicked, this, &ProfileEditorDialog::testCheck);
 
     // ---- Connect ----
@@ -362,6 +369,73 @@ void ProfileEditorDialog::testWake() {
                                         : QStringLiteral("Failed: %1").arg(summary));
     });
     waker->start();
+}
+
+void ProfileEditorDialog::applyTailscalePeer(const TailscalePeer& peer) {
+    hostEdit_->setText(preferredTailscaleHost(peer));
+    if (nameEdit_->text().trimmed().isEmpty()) {
+        nameEdit_->setText(peer.displayName());
+    }
+}
+
+void ProfileEditorDialog::chooseTailscale() {
+    chooseTailscaleButton_->setEnabled(false);
+    TailscaleReader* reader = tailscaleReaderFactory_ ? tailscaleReaderFactory_(this) : nullptr;
+    if (!reader) {
+        chooseTailscaleButton_->setEnabled(true);
+        const QString msg = QStringLiteral("Tailscale reader is not available");
+        if (isVisible()) {
+            QMessageBox::information(this, QStringLiteral("Tailscale"), msg);
+        }
+        checkTestLabel_->setText(msg);
+        return;
+    }
+    connect(reader, &TailscaleReader::finished, this, [this, reader](const TailscaleStatus& status) {
+        chooseTailscaleButton_->setEnabled(true);
+        reader->deleteLater();
+        QString errorMsg;
+        if (!status.available) {
+            errorMsg = status.error.isEmpty() ? QStringLiteral("Tailscale is not available") : status.error;
+        } else if (!status.running()) {
+            errorMsg = QStringLiteral("Tailscale is not running (state: %1)").arg(status.backendState);
+        } else if (status.peers.empty()) {
+            errorMsg = QStringLiteral("No Tailscale peers found");
+        }
+        if (!errorMsg.isEmpty()) {
+            if (isVisible()) {
+                QMessageBox::information(this, QStringLiteral("Tailscale"), errorMsg);
+            }
+            checkTestLabel_->setText(errorMsg);
+            return;
+        }
+
+        QDialog dlg(this);
+        dlg.setWindowTitle(QStringLiteral("Choose Tailscale Computer"));
+        auto* layout = new QVBoxLayout(&dlg);
+        auto* list = new QListWidget(&dlg);
+        for (std::size_t i = 0; i < status.peers.size(); ++i) {
+            const auto& peer = status.peers[i];
+            const QString onlineStr = peer.online ? QStringLiteral("online") : QStringLiteral("offline");
+            const QString itemText = QStringLiteral("%1 — %2 (%3)")
+                                         .arg(peer.displayName(), preferredTailscaleHost(peer), onlineStr);
+            auto* item = new QListWidgetItem(itemText, list);
+            item->setData(Qt::UserRole, static_cast<int>(i));
+        }
+        if (list->count() > 0) list->setCurrentRow(0);
+        connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+        layout->addWidget(list);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+        connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        layout->addWidget(buttons);
+        if (dlg.exec() == QDialog::Accepted && list->currentItem()) {
+            const int idx = list->currentItem()->data(Qt::UserRole).toInt();
+            if (idx >= 0 && idx < static_cast<int>(status.peers.size())) {
+                applyTailscalePeer(status.peers[static_cast<std::size_t>(idx)]);
+            }
+        }
+    });
+    reader->start();
 }
 
 void ProfileEditorDialog::testCheck() {

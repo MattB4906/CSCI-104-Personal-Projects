@@ -62,4 +62,13 @@ const Profile* findProfile(const std::vector<Profile>& profiles, const QString& 
 bool removeProfile(std::vector<Profile>& profiles, const QString& name);
 void upsertProfile(std::vector<Profile>& profiles, Profile profile);  // replaces one with the same name
 
+// Suggests a unique name for duplicating `sourceName`:
+// strips a trailing " Copy" or " Copy <N>" stem if present, then tries
+// "<Stem> Copy", "<Stem> Copy 2", "<Stem> Copy 3", ... until unused.
+QString suggestedDuplicateName(const std::vector<Profile>& existing, const QString& sourceName);
+
+// Moves the named profile to targetIndex (clamped to profiles.size() - 1),
+// preserving the relative order of all other profiles. Returns false if not found.
+bool moveProfile(std::vector<Profile>& profiles, const QString& name, std::size_t targetIndex);
+
 }  // namespace wakedeck

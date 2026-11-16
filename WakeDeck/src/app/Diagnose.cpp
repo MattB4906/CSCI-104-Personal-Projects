@@ -90,6 +90,7 @@ int runDiagnose(const QString& path) {
     lines << QStringLiteral("dockTile=%1").arg(systemServicesAvailable() && platform::dockTileAvailable()
                                                    ? QStringLiteral("available")
                                                    : QStringLiteral("unavailable"));
+    lines << QStringLiteral("urlScheme=%1").arg(platform::registeredUrlScheme());
     const QString tailscaleCli = findTailscaleCli();
     const TailscaleStatus tailscale = tailscaleStatus();
     lines << QStringLiteral("tailscaleCli=%1").arg(tailscaleCli.isEmpty() ? QStringLiteral("not found") : tailscaleCli);
