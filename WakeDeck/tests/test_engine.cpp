@@ -1628,6 +1628,25 @@ private slots:
         MoonlightHost h4;
         QCOMPARE(h4.preferredHost(), QString());
         QCOMPARE(h4.preferredPort(), 47989);
+
+        // Does not fall through across unrelated address fields:
+        MoonlightHost h5;
+        h5.manualAddress = QStringLiteral("192.0.2.1");
+        h5.manualPort = 0;
+        h5.localAddress = QStringLiteral("192.168.1.10");
+        h5.localPort = 2222;
+        QCOMPARE(h5.preferredPort(), 47989);
+
+        // Port out of bounds falls back to 47989:
+        MoonlightHost h6;
+        h6.localAddress = QStringLiteral("192.168.1.10");
+        h6.localPort = 70000;
+        QCOMPARE(h6.preferredPort(), 47989);
+
+        MoonlightHost h7;
+        h7.remoteAddress = QStringLiteral("100.64.0.10");
+        h7.remotePort = -5;
+        QCOMPARE(h7.preferredPort(), 47989);
     }
 
     void moonlightSettingsAppModes() {
@@ -1693,6 +1712,19 @@ private slots:
         QVERIFY(iniResult.ok);
         QCOMPARE(iniResult.hosts.size(), std::size_t(1));
         QCOMPARE(iniResult.hosts[0].name, QStringLiteral("Conf PC"));
+
+        // Host with name but empty address is skipped:
+        QTemporaryDir dirNoAddr;
+        const QString noAddrPath = dirNoAddr.filePath(QStringLiteral("noaddr.ini"));
+        QSettings noAddrSettings(noAddrPath, QSettings::IniFormat);
+        noAddrSettings.beginWriteArray(QStringLiteral("hosts"));
+        noAddrSettings.setArrayIndex(0);
+        noAddrSettings.setValue(QStringLiteral("hostname"), QStringLiteral("No Address PC"));
+        noAddrSettings.endArray();
+        noAddrSettings.sync();
+        const auto noAddrResult = readMoonlightSettings(noAddrSettings, noAddrPath);
+        QVERIFY(!noAddrResult.ok);
+        QVERIFY(noAddrResult.hosts.empty());
     }
 
     void batchCheckerRunsMultipleProfiles() {
@@ -1770,6 +1802,31 @@ private slots:
 
         QTRY_VERIFY_WITH_TIMEOUT(finishedFired, 500);
         QVERIFY(resultEntries.empty());
+    }
+
+    void batchCheckerTimeoutOverride() {
+        Profile p;
+        p.name = QStringLiteral("OverridePC");
+        p.check.host = QStringLiteral("127.0.0.1");
+        p.check.timeoutMs = 2000;
+
+        int receivedTimeoutMs = 0;
+        auto probeFor = [&](const Profile& prof, QObject* parent) -> Probe* {
+            receivedTimeoutMs = prof.check.timeoutMs;
+            ProbeResult r;
+            r.status = ProbeStatus::Ready;
+            r.detail = QStringLiteral("ok");
+            return new FakeProbe(r, 0, parent);
+        };
+
+        BatchChecker checker({p}, probeFor, 4500);
+        bool finishedFired = false;
+        QObject::connect(&checker, &BatchChecker::finished, [&](const std::vector<BatchCheckEntry>&) {
+            finishedFired = true;
+        });
+        checker.start();
+        QTRY_VERIFY(finishedFired);
+        QCOMPARE(receivedTimeoutMs, 4500);
     }
 };
 

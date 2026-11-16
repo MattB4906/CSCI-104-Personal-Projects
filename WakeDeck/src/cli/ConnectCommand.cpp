@@ -97,15 +97,22 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
             return usageError("--port and --kind can only be used with --host", printCheckUsage);
         }
     }
+    if (flags.has("--host") && flags.has("--store")) {
+        return usageError("--store can only be used with --profile or --all", printCheckUsage);
+    }
 
     std::optional<int> timeoutMsOverride;
     if (flags.has("--timeout-ms")) {
+        const std::string s = flags.valueOr("--timeout-ms", "");
+        std::size_t pos = 0;
         try {
-            int ms = std::stoi(flags.valueOr("--timeout-ms", ""));
-            if (ms < 100 || ms > 60000) return usageError("--timeout-ms must be from 100 to 60000", printCheckUsage);
+            int ms = std::stoi(s, &pos);
+            if (pos != s.size() || ms < 100 || ms > 60000) {
+                return usageError("--timeout-ms must be a whole number of milliseconds from 100 to 60000", printCheckUsage);
+            }
             timeoutMsOverride = ms;
         } catch (...) {
-            return usageError("--timeout-ms must be a whole number of milliseconds", printCheckUsage);
+            return usageError("--timeout-ms must be a whole number of milliseconds from 100 to 60000", printCheckUsage);
         }
     }
 
@@ -117,6 +124,7 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
             std::cerr << "error: " << loaded.error.toStdString() << "\n";
             return 2;
         }
+        if (!loaded.warning.isEmpty()) std::cerr << "warning: " << loaded.warning.toStdString() << "\n";
         if (loaded.profiles.empty()) {
             std::cout << "No profiles in " << store.path().toStdString() << ".\n";
             std::cout << "Summary: 0 of 0 ready\n";
@@ -163,6 +171,7 @@ int runCheck(int argc, char** argv, const std::vector<std::string>& args) {
             std::cerr << "error: " << loaded.error.toStdString() << "\n";
             return 2;
         }
+        if (!loaded.warning.isEmpty()) std::cerr << "warning: " << loaded.warning.toStdString() << "\n";
         const Profile* profile = findProfile(loaded.profiles, name);
         if (!profile) {
             std::cerr << "error: profile \"" << name.toStdString() << "\" not found in " << store.path().toStdString() << "\n";

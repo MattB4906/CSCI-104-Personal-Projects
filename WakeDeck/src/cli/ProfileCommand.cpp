@@ -181,9 +181,12 @@ int move(const ProfileStore& store, const QString& name, const std::string& toSt
     bool targetTop = (toStr == "top");
     bool targetBottom = (toStr == "bottom");
     if (!targetTop && !targetBottom) {
+        std::size_t pos = 0;
         try {
-            int n = std::stoi(toStr);
-            if (n < 1) return usageError("--to index must be >= 1", printProfileUsage);
+            int n = std::stoi(toStr, &pos);
+            if (pos != toStr.size() || n < 1) {
+                return usageError("invalid --to destination '" + toStr + "': expected top, bottom, or 1..N", printProfileUsage);
+            }
             targetIndex = static_cast<std::size_t>(n - 1);
         } catch (...) {
             return usageError("invalid --to destination '" + toStr + "': expected top, bottom, or 1..N", printProfileUsage);
@@ -248,7 +251,9 @@ int importMoonlight(const ProfileStore& store, const Flags& flags) {
         }
     }
 
-    if (const int rc = saveOrExplain(store, profiles)) return rc;
+    if (importedCount > 0) {
+        if (const int rc = saveOrExplain(store, profiles)) return rc;
+    }
     std::cout << "Imported " << importedCount << " computer(s) from Moonlight into " << text(store.path());
     if (skippedCount > 0) {
         std::cout << " (" << skippedCount << " skipped)";

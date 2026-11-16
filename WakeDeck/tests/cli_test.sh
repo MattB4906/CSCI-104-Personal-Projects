@@ -76,6 +76,8 @@ expect 1 "check with --host and --all" -- check --host 192.0.2.10 --all
 expect 1 "check with --profile and --port" -- check --profile "Test PC" --port 47989
 expect 1 "check with --all and --port" -- check --all --port 47989
 expect 1 "check with --profile and --kind" -- check --profile "Test PC" --kind tcp
+expect 1 "check with --host and --store" -- check --host 192.0.2.10 --store /nonexistent/profiles.json
+expect 1 "check with bad timeout-ms" -- check --profile "Test PC" --timeout-ms 500ms
 expect 1 "connect without check host" -- connect
 expect 1 "connect with --mac but no --to" -- connect --check-host 192.0.2.10 --mac "$MAC"
 expect 1 "connect with --ports but no wake" -- connect --check-host 192.0.2.10 --ports 9
@@ -260,6 +262,7 @@ expect 2 "profile duplicate existing without replace" -- profile duplicate "Alph
 expect 0 "profile duplicate existing with replace" -- profile duplicate "Alpha" "Beta" --replace --store "$F2STORE"
 
 # Move testing
+expect 1 "profile move bad --to trailing characters" -- profile move "Alpha" --to 2abc --store "$F2STORE"
 expect 0 "profile move Alpha to bottom" -- profile move "Alpha" --to bottom --store "$F2STORE"
 expect 0 "profile move Alpha to top" -- profile move "Alpha" --to top --store "$F2STORE"
 expect 0 "profile move Alpha to 3" -- profile move "Alpha" --to 3 --store "$F2STORE"
@@ -282,7 +285,13 @@ contains "import-moonlight dry run" "Discovered 1 computer(s)" -- profile import
 contains "import-moonlight dry run names host" "Living Room Rig" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE" --dry-run
 expect 0 "import-moonlight imports computer" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE"
 contains "store has imported computer" "Living Room Rig" -- profile list --store "$F2STORE"
+cp "$F2STORE" "$F2DIR/before_skip.json"
 contains "import-moonlight skip existing" "Skipped existing profile \"Living Room Rig\"" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE"
+total=$((total + 1))
+if ! cmp -s "$F2STORE" "$F2DIR/before_skip.json"; then
+    failed=$((failed + 1))
+    echo "FAILED: store was touched when all Moonlight hosts were skipped"
+fi
 contains "import-moonlight replace" "Imported 1 computer" -- profile import-moonlight --from "$MLFILE" --store "$F2STORE" --replace
 rm -rf "$F2DIR"
 

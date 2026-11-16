@@ -654,8 +654,10 @@ int MainWindow::importMoonlightHosts(const std::vector<MoonlightHost>& hosts, bo
             ++imported;
         }
     }
-    if (!saveProfiles(error)) return -1;
-    refreshList();
+    if (imported > 0) {
+        if (!saveProfiles(error)) return -1;
+        refreshList();
+    }
     return imported;
 }
 

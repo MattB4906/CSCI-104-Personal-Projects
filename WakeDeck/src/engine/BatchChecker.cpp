@@ -31,13 +31,13 @@ void BatchChecker::start() {
 
         entries_.resize(profiles_.size());
         for (std::size_t i = 0; i < profiles_.size(); ++i) {
-            const Profile& p = profiles_[i];
-            entries_[i].profileName = p.name;
-            entries_[i].target = p.check;
+            Profile effectiveProfile = profiles_[i];
             if (timeoutMsOverride_ > 0) {
-                entries_[i].target.timeoutMs = timeoutMsOverride_;
+                effectiveProfile.check.timeoutMs = timeoutMsOverride_;
             }
-            Probe* probe = probeForProfile_ ? probeForProfile_(p, this) : nullptr;
+            entries_[i].profileName = effectiveProfile.name;
+            entries_[i].target = effectiveProfile.check;
+            Probe* probe = probeForProfile_ ? probeForProfile_(effectiveProfile, this) : nullptr;
             if (!probe) {
                 ProbeResult res;
                 res.status = ProbeStatus::NotReady;

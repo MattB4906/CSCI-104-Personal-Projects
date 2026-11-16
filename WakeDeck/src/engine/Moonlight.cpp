@@ -14,9 +14,12 @@ QString MoonlightHost::preferredHost() const {
 }
 
 int MoonlightHost::preferredPort() const {
-    if (!manualAddress.trimmed().isEmpty() && manualPort > 0) return manualPort;
-    if (!localAddress.trimmed().isEmpty() && localPort > 0) return localPort;
-    if (!remoteAddress.trimmed().isEmpty() && remotePort > 0) return remotePort;
+    auto validPort = [](int port) -> int {
+        return (port >= 1 && port <= 65535) ? port : 47989;
+    };
+    if (!manualAddress.trimmed().isEmpty()) return validPort(manualPort);
+    if (!localAddress.trimmed().isEmpty()) return validPort(localPort);
+    if (!remoteAddress.trimmed().isEmpty()) return validPort(remotePort);
     return 47989;
 }
 
@@ -144,7 +147,7 @@ MoonlightReadResult readMoonlightSettings(QSettings& settings, const QString& so
             }
         }
 
-        if (!host.name.isEmpty()) {
+        if (!host.name.isEmpty() && !host.preferredHost().isEmpty()) {
             hosts.push_back(std::move(host));
         }
     }

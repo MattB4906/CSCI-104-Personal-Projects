@@ -192,7 +192,9 @@ public:
         if (running) {
             QString statusText;
             if (!runningProfile.isEmpty()) {
-                statusText = QStringLiteral("%1 — running…").arg(runningProfile);
+                QString escaped = runningProfile;
+                escaped.replace(QLatin1Char('&'), QStringLiteral("&&"));
+                statusText = QStringLiteral("%1 — running…").arg(escaped);
             } else {
                 statusText = QStringLiteral("Checking all computers…");
             }
@@ -204,7 +206,9 @@ public:
             }
             menu_->addSeparator();
             for (const QString& name : profileNames) {
-                QAction* act = menu_->addAction(QStringLiteral("Wake & Connect — %1").arg(name));
+                QString escaped = name;
+                escaped.replace(QLatin1Char('&'), QStringLiteral("&&"));
+                QAction* act = menu_->addAction(QStringLiteral("Wake && Connect — %1").arg(escaped));
                 act->setEnabled(false);
             }
         } else {
@@ -213,7 +217,9 @@ public:
                 act->setEnabled(false);
             } else {
                 for (const QString& name : profileNames) {
-                    QAction* act = menu_->addAction(QStringLiteral("Wake & Connect — %1").arg(name));
+                    QString escaped = name;
+                    escaped.replace(QLatin1Char('&'), QStringLiteral("&&"));
+                    QAction* act = menu_->addAction(QStringLiteral("Wake && Connect — %1").arg(escaped));
                     QObject::connect(act, &QAction::triggered, this, [this, name] {
                         emit connectRequested(name);
                     });
