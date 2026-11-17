@@ -116,7 +116,7 @@ contains "profile help names import-moonlight" "import-moonlight" -- profile --h
 contains "check help names --profile" "--profile" -- check --help
 contains "check help names --all" "--all" -- check --help
 
-contains "version string" "wakedeck-cli 1.3.0" -- --version
+contains "version string" "wakedeck-cli 1.3.1" -- --version
 contains "help lists check" "check" -- --help
 contains "help lists connect" "connect" -- --help
 contains "help lists profile" "profile" -- --help

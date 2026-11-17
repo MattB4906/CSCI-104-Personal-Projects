@@ -151,6 +151,7 @@ public:
     void startOpenClient();
     void keepWaiting();
     void cancelRun();
+    void quitApplication();
 
 signals:
     void runFinished(wakedeck::Outcome outcome);
@@ -208,6 +209,7 @@ private:
     qint64 typicalWaitMs(const Profile& profile) const;
     void forgetHistory(const QString& name);                      // a computer was deleted
     void moveHistory(const QString& from, const QString& to);     // a computer was renamed
+    void clearBadge(const QString& name);
 
     ProfileStore store_;
     FactoriesFor factoriesFor_;
@@ -265,6 +267,7 @@ private:
     QAction* moveDownAction_ = nullptr;
     QAction* importMoonlightAction_ = nullptr;
     QAction* checkAllAction_ = nullptr;
+    QAction* quitAction_ = nullptr;
     bool refusalNoted_ = false;      // the "switched off" line is shown once per launch (one window per launch)
     QFormLayout* factsLayout_ = nullptr;
     QWidget* progressRow_ = nullptr;

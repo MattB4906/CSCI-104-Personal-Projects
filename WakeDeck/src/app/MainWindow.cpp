@@ -118,6 +118,7 @@ void MainWindow::buildUi() {
             profiles_ = std::move(reordered);
             saveProfiles(nullptr);
             updateDockMenu();
+            refreshDetails();
         }
     });
     leftLayout->addWidget(list_, 1);
@@ -278,42 +279,64 @@ void MainWindow::buildMenus() {
     QMenu* file = menuBar()->addMenu(QStringLiteral("&File"));
     QAction* add = file->addAction(QStringLiteral("&New Computer…"), this, &MainWindow::addNew);
     add->setShortcut(QKeySequence::New);
-    file->addAction(QStringLiteral("&Edit Computer…"), this, &MainWindow::editCurrent);
+    add->setMenuRole(QAction::NoRole);
+    QAction* edit = file->addAction(QStringLiteral("&Edit Computer…"), this, &MainWindow::editCurrent);
+    edit->setMenuRole(QAction::NoRole);
     duplicateAction_ = file->addAction(QStringLiteral("&Duplicate Computer…"), this, &MainWindow::duplicateCurrent);
     duplicateAction_->setObjectName(QStringLiteral("duplicateAction"));
     duplicateAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
-    file->addAction(QStringLiteral("&Delete Computer"), this, &MainWindow::deleteCurrent);
+    duplicateAction_->setMenuRole(QAction::NoRole);
+    QAction* deleteAction = file->addAction(QStringLiteral("&Delete Computer"), this, &MainWindow::deleteCurrent);
+    deleteAction->setMenuRole(QAction::NoRole);
     file->addSeparator();
     moveUpAction_ = file->addAction(QStringLiteral("Move &Up"), this, [this] { moveCurrentProfile(-1); });
     moveUpAction_->setObjectName(QStringLiteral("moveUpAction"));
     moveUpAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Up));
+    moveUpAction_->setMenuRole(QAction::NoRole);
     moveDownAction_ = file->addAction(QStringLiteral("Move &Down"), this, [this] { moveCurrentProfile(1); });
     moveDownAction_->setObjectName(QStringLiteral("moveDownAction"));
     moveDownAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Down));
+    moveDownAction_->setMenuRole(QAction::NoRole);
     file->addSeparator();
-    file->addAction(QStringLiteral("&Import Profile…"), this, &MainWindow::importProfile);
+    QAction* importProfile = file->addAction(QStringLiteral("&Import Profile…"), this, &MainWindow::importProfile);
+    importProfile->setMenuRole(QAction::NoRole);
     importMoonlightAction_ = file->addAction(QStringLiteral("Import from &Moonlight…"), this, &MainWindow::importMoonlight);
     importMoonlightAction_->setObjectName(QStringLiteral("importMoonlightAction"));
-    file->addAction(QStringLiteral("E&xport Profile…"), this, &MainWindow::exportCurrent);
-    file->addAction(QStringLiteral("Load E&xample"), this, [this] {
+    importMoonlightAction_->setMenuRole(QAction::NoRole);
+    QAction* exportCurrent = file->addAction(QStringLiteral("E&xport Profile…"), this, &MainWindow::exportCurrent);
+    exportCurrent->setMenuRole(QAction::NoRole);
+    QAction* loadExampleAction = file->addAction(QStringLiteral("Load E&xample"), this, [this] {
         QString error;
         if (!loadExample(&error)) showError(QStringLiteral("Could not load the example"), error);
     });
+    loadExampleAction->setMenuRole(QAction::NoRole);
+    file->addSeparator();
+    quitAction_ = file->addAction(QStringLiteral("&Quit WakeDeck"), this, &MainWindow::quitApplication);
+    quitAction_->setObjectName(QStringLiteral("quitAction"));
+    quitAction_->setMenuRole(QAction::QuitRole);
+    quitAction_->setShortcut(QKeySequence::Quit);
 
     QMenu* run = menuBar()->addMenu(QStringLiteral("&Run"));
     QAction* wakeConnect = run->addAction(QStringLiteral("&Wake && Connect"), this, &MainWindow::startWakeAndConnect);
     wakeConnect->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return));
-    run->addAction(QStringLiteral("&Check Now"), this, &MainWindow::startCheckOnly);
+    wakeConnect->setMenuRole(QAction::NoRole);
+    QAction* checkNow = run->addAction(QStringLiteral("&Check Now"), this, &MainWindow::startCheckOnly);
+    checkNow->setMenuRole(QAction::NoRole);
     checkAllAction_ = run->addAction(QStringLiteral("Check &All Computers"), this, &MainWindow::startCheckAll);
     checkAllAction_->setObjectName(QStringLiteral("checkAllAction"));
     checkAllAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_K));
-    run->addAction(QStringLiteral("Wake &Only"), this, &MainWindow::startWakeOnly);
-    run->addAction(QStringLiteral("&Open Client"), this, &MainWindow::startOpenClient);
+    checkAllAction_->setMenuRole(QAction::NoRole);
+    QAction* wakeOnly = run->addAction(QStringLiteral("Wake &Only"), this, &MainWindow::startWakeOnly);
+    wakeOnly->setMenuRole(QAction::NoRole);
+    QAction* openClient = run->addAction(QStringLiteral("&Open Client"), this, &MainWindow::startOpenClient);
+    openClient->setMenuRole(QAction::NoRole);
     run->addSeparator();
-    run->addAction(QStringLiteral("Cancel"), this, &MainWindow::cancelRun);
+    QAction* cancel = run->addAction(QStringLiteral("Cancel"), this, &MainWindow::cancelRun);
+    cancel->setMenuRole(QAction::NoRole);
     run->addSeparator();
     quitWhenClientClosesAction_ = run->addAction(QStringLiteral("&Quit When Client Closes"));
     quitWhenClientClosesAction_->setObjectName(QStringLiteral("quitWhenClientClosesAction"));
+    quitWhenClientClosesAction_->setMenuRole(QAction::NoRole);
     quitWhenClientClosesAction_->setCheckable(true);
     quitWhenClientClosesAction_->setChecked(QSettings().value(QLatin1String(kQuitWhenClientClosesKey), true).toBool());
     quitWhenClientClosesAction_->setToolTip(
@@ -322,6 +345,7 @@ void MainWindow::buildMenus() {
     connect(quitWhenClientClosesAction_, &QAction::toggled, this, &MainWindow::onQuitOptionToggled);
     notifyWhenReadyAction_ = run->addAction(QStringLiteral("&Notify When Ready"));
     notifyWhenReadyAction_->setObjectName(QStringLiteral("notifyWhenReadyAction"));
+    notifyWhenReadyAction_->setMenuRole(QAction::NoRole);
     notifyWhenReadyAction_->setCheckable(true);
     notifyWhenReadyAction_->setChecked(QSettings().value(QLatin1String(kNotifyWhenReadyKey), true).toBool());
     notifyWhenReadyAction_->setToolTip(
@@ -331,8 +355,11 @@ void MainWindow::buildMenus() {
             [](bool on) { QSettings().setValue(QLatin1String(kNotifyWhenReadyKey), on); });
 
     QMenu* help = menuBar()->addMenu(QStringLiteral("&Help"));
-    help->addAction(QStringLiteral("How Waking &Works"), this, &MainWindow::showHowWakingWorks);
-    help->addAction(QStringLiteral("&About WakeDeck"), this, &MainWindow::showAbout);
+    QAction* howWakingWorks = help->addAction(QStringLiteral("How Waking &Works"), this, &MainWindow::showHowWakingWorks);
+    howWakingWorks->setMenuRole(QAction::NoRole);
+    QAction* aboutAction = help->addAction(QStringLiteral("&About WakeDeck"), this, &MainWindow::showAbout);
+    aboutAction->setObjectName(QStringLiteral("aboutAction"));
+    aboutAction->setMenuRole(QAction::AboutRole);
 }
 
 // ---- Profiles ---------------------------------------------------------------
@@ -460,8 +487,10 @@ bool MainWindow::saveProfiles(QString* error) {
 bool MainWindow::addProfile(Profile profile, QString* error) {
     if (!storeWritable(error)) return false;
     const QString name = profile.name;
+    const bool replacing = findProfile(profiles_, name) != nullptr;
     upsertProfile(profiles_, std::move(profile));
     if (!saveProfiles(error)) return false;
+    if (replacing) clearBadge(name);
     refreshList();
     selectProfile(name);
     return true;
@@ -473,6 +502,7 @@ bool MainWindow::removeCurrentProfile(QString* error) {
     const QString name = profile->name;  // a copy: the element itself is about to go
     removeProfile(profiles_, name);
     if (!saveProfiles(error)) return false;
+    clearBadge(name);
     forgetHistory(name);
     refreshList();
     return true;
@@ -592,6 +622,8 @@ bool MainWindow::updateProfile(const QString& oldName, Profile edited, QString* 
     }
     profiles_[oldIndex] = std::move(edited);
     if (!saveProfiles(error)) return false;
+    clearBadge(oldName);
+    clearBadge(newName);
     if (renamed) moveHistory(oldName, newName);
     refreshList();
     selectProfile(newName);
@@ -640,12 +672,14 @@ void MainWindow::exportCurrent() {
 int MainWindow::importMoonlightHosts(const std::vector<MoonlightHost>& hosts, bool replaceExisting, QString* error) {
     if (!storeWritable(error)) return -1;
     int imported = 0;
+    QStringList replacedNames;
     for (const auto& h : hosts) {
         Profile p = h.toProfile();
         auto it = std::find_if(profiles_.begin(), profiles_.end(),
                                [&p](const Profile& existing) { return sameProfileName(existing.name, p.name); });
         if (it != profiles_.end()) {
             if (replaceExisting) {
+                replacedNames.append(it->name);
                 *it = std::move(p);
                 ++imported;
             }
@@ -656,6 +690,9 @@ int MainWindow::importMoonlightHosts(const std::vector<MoonlightHost>& hosts, bo
     }
     if (imported > 0) {
         if (!saveProfiles(error)) return -1;
+        for (const QString& name : replacedNames) {
+            clearBadge(name);
+        }
         refreshList();
     }
     return imported;
@@ -801,6 +838,16 @@ QString MainWindow::profileCheckBadge(const QString& name) const {
         }
     }
     return {};
+}
+
+void MainWindow::clearBadge(const QString& name) {
+    for (auto it = profileBadges_.begin(); it != profileBadges_.end(); ) {
+        if (sameProfileName(it->first, name)) {
+            it = profileBadges_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void MainWindow::startCheckAll() {
@@ -1250,6 +1297,14 @@ void MainWindow::keepWaiting() {
 
 void MainWindow::cancelRun() {
     if (session_) session_->cancel();
+}
+
+void MainWindow::quitApplication() {
+    stopWatchingClient();
+    if (session_) session_->cancel();
+    stopProgress();
+    close();
+    if (quitHook_) quitHook_();
 }
 
 void MainWindow::locateClient() {

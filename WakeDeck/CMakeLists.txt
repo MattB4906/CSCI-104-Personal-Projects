@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(WakeDeck VERSION 1.3.0 LANGUAGES CXX)
+project(WakeDeck VERSION 1.3.1 LANGUAGES CXX)
 set(WAKEDECK_VERSION_STRING "${PROJECT_VERSION}")  # the one place the version is written
 
 # The release script sets CMAKE_OSX_DEPLOYMENT_TARGET to 13.0 and builds against

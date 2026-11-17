@@ -9,6 +9,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -2115,6 +2116,147 @@ private slots:
         QCOMPARE(window.currentProfile()->name, QStringLiteral("PC2"));
         window.selectProfile(QStringLiteral("pc1"));
         QCOMPARE(window.currentProfile()->name, QStringLiteral("PC1"));
+    }
+
+    void quitActionAndMenuRoles() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile profile = sampleProfile(QStringLiteral("PC"), true, false);
+        profile.overallTimeoutMs = 10000;
+        QVERIFY(store.save({profile}, nullptr));
+
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::TimedOut};
+
+        MainWindow window(store, fakeFactories(script));
+        const auto log = useFakeSystem(window);
+        window.setProgressIntervalMs(50);
+        window.setQuitWhenClientCloses(true);
+
+        auto* quitWhenClientClosesAction = window.findChild<QAction*>(QStringLiteral("quitWhenClientClosesAction"));
+        QVERIFY(quitWhenClientClosesAction != nullptr);
+        QCOMPARE(quitWhenClientClosesAction->menuRole(), QAction::NoRole);
+
+        auto* aboutAction = window.findChild<QAction*>(QStringLiteral("aboutAction"));
+        QVERIFY(aboutAction != nullptr);
+        QCOMPARE(aboutAction->menuRole(), QAction::AboutRole);
+
+        auto* quitAction = window.findChild<QAction*>(QStringLiteral("quitAction"));
+        QVERIFY(quitAction != nullptr);
+        QCOMPARE(quitAction->menuRole(), QAction::QuitRole);
+        QCOMPARE(quitAction->shortcut(), QKeySequence(QKeySequence::Quit));
+
+        int quits = 0;
+        window.setQuitHook([&quits] { ++quits; });
+
+        window.startWakeAndConnect();
+        QTRY_VERIFY_WITH_TIMEOUT(window.isRunning(), 2000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.progressVisible(), 2000);
+
+        quitAction->trigger();
+
+        QCOMPARE(quits, 1);
+        QVERIFY(!window.isRunning());
+        QVERIFY(!window.progressVisible());
+        QVERIFY(!log->dock.empty());
+        QCOMPARE(log->dock.back(), kDockCleared);
+        QCOMPARE(window.quitWhenClientCloses(), true);
+    }
+
+    void editingRenamingAndDeletingClearCheckAllBadges() {
+        QTemporaryDir dir;
+        const ProfileStore store(dir.filePath(QStringLiteral("profiles.json")));
+        Profile p1 = sampleProfile(QStringLiteral("Alpha"), false, false);
+        Profile p2 = sampleProfile(QStringLiteral("Beta"), false, false);
+        Profile p3 = sampleProfile(QStringLiteral("Gamma"), false, false);
+        Profile p4 = sampleProfile(QStringLiteral("Delta"), false, false);
+        QVERIFY(store.save({p1, p2, p3, p4}, nullptr));
+
+        auto script = std::make_shared<Script>();
+        script->statuses = {ProbeStatus::Ready, ProbeStatus::Ready, ProbeStatus::Ready, ProbeStatus::Ready};
+
+        MainWindow window(store, fakeFactories(script));
+
+        bool finished = false;
+        QObject::connect(&window, &MainWindow::checkAllFinished, [&](int, int) {
+            finished = true;
+        });
+
+        window.startCheckAll();
+        QTRY_VERIFY(finished);
+
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("profileList"));
+        QVERIFY(list != nullptr);
+        QCOMPARE(list->count(), 4);
+
+        QCOMPARE(window.profileCheckBadge(QStringLiteral("Alpha")), QStringLiteral("ready"));
+        QCOMPARE(window.profileCheckBadge(QStringLiteral("Beta")), QStringLiteral("ready"));
+        QCOMPARE(window.profileCheckBadge(QStringLiteral("Gamma")), QStringLiteral("ready"));
+        QCOMPARE(window.profileCheckBadge(QStringLiteral("Delta")), QStringLiteral("ready"));
+
+        auto findItem = [&](const QString& name) -> QListWidgetItem* {
+            for (int i = 0; i < list->count(); ++i) {
+                if (list->item(i)->data(Qt::UserRole).toString() == name) return list->item(i);
+            }
+            return nullptr;
+        };
+
+        QVERIFY(findItem(QStringLiteral("Alpha")) != nullptr);
+        QCOMPARE(findItem(QStringLiteral("Alpha"))->text(), QStringLiteral("Alpha — ready"));
+        QVERIFY(findItem(QStringLiteral("Beta")) != nullptr);
+        QCOMPARE(findItem(QStringLiteral("Beta"))->text(), QStringLiteral("Beta — ready"));
+        QVERIFY(findItem(QStringLiteral("Gamma")) != nullptr);
+        QCOMPARE(findItem(QStringLiteral("Gamma"))->text(), QStringLiteral("Gamma — ready"));
+        QVERIFY(findItem(QStringLiteral("Delta")) != nullptr);
+        QCOMPARE(findItem(QStringLiteral("Delta"))->text(), QStringLiteral("Delta — ready"));
+
+        // 1. Edit Alpha (same name)
+        Profile editedAlpha = p1;
+        editedAlpha.notes = QStringLiteral("Edited notes");
+        QVERIFY(window.updateProfile(QStringLiteral("Alpha"), editedAlpha));
+        QVERIFY(window.profileCheckBadge(QStringLiteral("Alpha")).isEmpty());
+        QCOMPARE(findItem(QStringLiteral("Alpha"))->text(), QStringLiteral("Alpha"));
+
+        // 2. Rename Beta to Beta Renamed
+        Profile renamedBeta = p2;
+        renamedBeta.name = QStringLiteral("Beta Renamed");
+        QVERIFY(window.updateProfile(QStringLiteral("Beta"), renamedBeta));
+        QVERIFY(window.profileCheckBadge(QStringLiteral("Beta")).isEmpty());
+        QVERIFY(window.profileCheckBadge(QStringLiteral("Beta Renamed")).isEmpty());
+        QVERIFY(findItem(QStringLiteral("Beta")) == nullptr);
+        QVERIFY(findItem(QStringLiteral("Beta Renamed")) != nullptr);
+        QCOMPARE(findItem(QStringLiteral("Beta Renamed"))->text(), QStringLiteral("Beta Renamed"));
+
+        // 3. Delete Gamma
+        window.selectProfile(QStringLiteral("Gamma"));
+        QVERIFY(window.removeCurrentProfile());
+        QVERIFY(window.profileCheckBadge(QStringLiteral("Gamma")).isEmpty());
+        QVERIFY(findItem(QStringLiteral("Gamma")) == nullptr);
+
+        // 4. Untouched Delta keeps its badge
+        QCOMPARE(window.profileCheckBadge(QStringLiteral("Delta")), QStringLiteral("ready"));
+        QVERIFY(findItem(QStringLiteral("Delta")) != nullptr);
+        QCOMPARE(findItem(QStringLiteral("Delta"))->text(), QStringLiteral("Delta — ready"));
+
+        // 5. Replacing an existing computer with addProfile clears its badge too
+        Profile replacedDelta = p4;
+        replacedDelta.notes = QStringLiteral("Replaced notes");
+        // Re-set badge for Delta to test replacement clear
+        window.startCheckAll();
+        QTRY_VERIFY_WITH_TIMEOUT(window.profileCheckBadge(QStringLiteral("Delta")) == QStringLiteral("ready"), 2000);
+        QVERIFY(window.addProfile(replacedDelta));
+        QVERIFY(window.profileCheckBadge(QStringLiteral("Delta")).isEmpty());
+        QCOMPARE(findItem(QStringLiteral("Delta"))->text(), QStringLiteral("Delta"));
+
+        // 6. Replacing an existing computer via importMoonlightHosts(..., true) clears its badge too
+        window.startCheckAll();
+        QTRY_VERIFY_WITH_TIMEOUT(window.profileCheckBadge(QStringLiteral("Delta")) == QStringLiteral("ready"), 2000);
+        MoonlightHost mh;
+        mh.name = QStringLiteral("Delta");
+        mh.localAddress = QStringLiteral("127.0.0.1");
+        QCOMPARE(window.importMoonlightHosts({mh}, true), 1);
+        QVERIFY(window.profileCheckBadge(QStringLiteral("Delta")).isEmpty());
+        QCOMPARE(findItem(QStringLiteral("Delta"))->text(), QStringLiteral("Delta"));
     }
 };
 
